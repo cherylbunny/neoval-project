@@ -21,7 +21,6 @@ if __name__ == '__main__':
     df = df.set_index('month_date')
     df.index = pd.to_datetime(df.index)
     df_p.index = pd.to_datetime(df_p.index)
-    # df_p already has 'period' as index from your example
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
 
