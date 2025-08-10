@@ -1,0 +1,155 @@
+---
+title: "project-main"
+author: "Yiran Yao"
+date: "2025-08-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE 
+                      #fig.width = 8, 
+                      #fig.height = 6, 
+                      #dpi = 300, 
+                      #cache = TRUE
+                      )
+```
+
+```{r library}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+#library(plotly)
+```
+
+```{r load-data}
+city_indexes <- read_csv("data/city_indexes.csv")
+factor_trends <- read_csv("data/df_factor_trends.csv")
+reg_coefs <- read_csv("data/df_reg_coefs.csv")
+
+pcs <- read_csv("data/df_pcs.csv")
+eofs_city <- read_csv("data/df_eofs_city.csv")
+eofs <- read_csv("data/df_eofs.csv")
+```
+
+```{r clean-data}
+city_indexes <- city_indexes |> 
+  clean_names() 
+```
+
+# Explore the city housing index 
+
+```{r city-index-eda}
+# transform df to long format 
+city_indexes_long <- city_indexes |>
+  pivot_longer(
+    cols = -month_date,        
+    names_to = "city",
+    values_to = "index"
+  )
+
+# separate city capitals and the rest of the state for clear visualization
+capitals <- c(
+  "australian_capital_territory",
+  "greater_adelaide","greater_brisbane","greater_darwin","greater_hobart",
+  "greater_melbourne","greater_perth","greater_sydney"
+)
+city_indexes_grouped <- city_indexes_long |> 
+  mutate(group = ifelse(city %in% capitals, "Capital cities", "Rest of state"))
+
+# plot city capitals 
+ggplot(
+  filter(city_indexes_grouped, group == "Capital cities"),
+  aes(month_date, index, colour = city)
+) +
+  geom_line() +
+  labs(
+    title = "City Indexes: Capital Cities",
+    x = "Month",
+    y = "Index",
+    colour = "City"
+  ) +
+  theme_minimal()
+
+# plot rest of the state 
+ggplot(
+  filter(city_indexes_grouped, group == "Rest of state"),
+  aes(month_date, index, colour = city)
+) +
+  geom_line() +
+  labs(
+    title = "City Indexes: Rest of State",
+    x = "Month",
+    y = "Index",
+    colour = "Region"
+  ) +
+  theme_minimal()
+
+# calculate and rank total growth 
+city_growth <- city_indexes_long |>
+  group_by(city) |>
+  summarise(growth = last(index) - first(index)) |>
+  arrange(desc(growth))
+
+# plot the rank of growth 
+ggplot(city_growth, aes(x = reorder(city, growth), y = growth)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Total Growth of Cities", x = "City", y = "Growth")
+```
+
+# Verify data integrity and trial index reconstruction (Melb) using PCA outputs
+
+```{r}
+# check if there are any missing period for each pc 
+pcs_check <- pcs |> 
+  arrange(mode, period) |> 
+  group_by(mode) |> 
+  summarise(
+    n = n(),
+    first_date = min(period),
+    last_date = max(period)
+  )
+
+# reconstruct melbourne index - missing the centering and scaling values
+mel_idx <- city_indexes |>
+  select(month_date, mel_obs = greater_melbourne)
+
+mel_loading <- eofs_city |>
+  filter(major_city == "GREATER MELBOURNE") |>
+  pull(loading_value)
+
+pcs_wide <- pcs |>
+  select(period, mode, pc_value) |>
+  pivot_wider(names_from = mode, values_from = pc_value) |>
+  mutate(month_date = ymd(period)) |>
+  arrange(month_date)
+
+pcs_matrix <- pcs_wide |>
+  select(-period, -month_date) |>
+  as.matrix()
+
+mel_rec_vec <- as.numeric(pcs_matrix %*% mel_loading)
+
+reconstructed_mel <- tibble(
+  month_date = pcs_wide$month_date,
+  mel_reconstructed = mel_rec_vec
+)
+
+# compare observed vs reconstructed 
+cmp <- inner_join(mel_idx, reconstructed_mel, by = "month_date")
+
+# Plot - the observed and reconstructed are on a different scale 
+ggplot(cmp, aes(month_date)) +
+  geom_line(aes(y = mel_obs, colour = "Observed")) +
+  geom_line(aes(y = mel_reconstructed, colour = "Reconstructed")) +
+  labs(title = "Greater Melbourne: Observed vs Reconstructed",
+       y = "Index") +
+  theme_minimal()
+
+```
+
+
+
+
