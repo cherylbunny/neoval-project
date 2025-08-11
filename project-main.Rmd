@@ -20,6 +20,13 @@ knitr::opts_chunk$set(echo = FALSE,
 library(tidyverse)
 library(janitor)
 library(lubridate)
+library(forecast)
+#library(feasts)
+#library(fable)
+#library(fabletools)
+#library(tsibble)
+library(fpp3)
+library(urca)
 #library(plotly)
 ```
 
@@ -38,9 +45,7 @@ city_indexes <- city_indexes |>
   clean_names() 
 ```
 
-# Explore the city housing index 
-
-```{r city-index-eda}
+```{r city-index-eda, eval = FALSE}
 # transform df to long format 
 city_indexes_long <- city_indexes |>
   pivot_longer(
@@ -99,55 +104,121 @@ ggplot(city_growth, aes(x = reorder(city, growth), y = growth)) +
   labs(title = "Total Growth of Cities", x = "City", y = "Growth")
 ```
 
-# Verify data integrity and trial index reconstruction (Melb) using PCA outputs
+# Fitting Time Series Model on the Mining Trend 
 
 ```{r}
-# check if there are any missing period for each pc 
-pcs_check <- pcs |> 
-  arrange(mode, period) |> 
-  group_by(mode) |> 
-  summarise(
-    n = n(),
-    first_date = min(period),
-    last_date = max(period)
-  )
+# create tsibble object 
+mining_trend <- factor_trends |>
+  transmute(
+    month_date = yearmonth(as.Date(month_date)), # change format to yyyy-m 
+    mining = as.numeric(mining)
+  ) |>
+  as_tsibble(index = month_date)
+```
 
-# reconstruct melbourne index - missing the centering and scaling values
-mel_idx <- city_indexes |>
-  select(month_date, mel_obs = greater_melbourne)
+## Exploratory Data Analysis
 
-mel_loading <- eofs_city |>
-  filter(major_city == "GREATER MELBOURNE") |>
-  pull(loading_value)
+Exploratory plots and statistical summaries are used to identify key patterns in the mining trend (Brisbane – Sydney spread) series and to guide the choice of an appropriate model for this data. 
 
-pcs_wide <- pcs |>
-  select(period, mode, pc_value) |>
-  pivot_wider(names_from = mode, values_from = pc_value) |>
-  mutate(month_date = ymd(period)) |>
-  arrange(month_date)
+Findings: 
 
-pcs_matrix <- pcs_wide |>
-  select(-period, -month_date) |>
-  as.matrix()
+* Time plot: The trend displays a prolonged, uneven rise from 2003 to 2012, followed by a sharp regime shift, then COVID-related fluctuations, with the level adjusting and showing time-varying patterns.
 
-mel_rec_vec <- as.numeric(pcs_matrix %*% mel_loading)
+* Seasonal plot: The mining trend shows little evidence of month-to-month seasonality, with no particular month standing out, though its overall level varies between years.
 
-reconstructed_mel <- tibble(
-  month_date = pcs_wide$month_date,
-  mel_reconstructed = mel_rec_vec
-)
+* Seasonal sub-series plot: The plot further confirms the absence of a dominant seasonal pattern, as each month shows a similar shape and the monthly means remain relatively flat and near zero.
 
-# compare observed vs reconstructed 
-cmp <- inner_join(mel_idx, reconstructed_mel, by = "month_date")
+* ACF plot: Significant autocorrelation at lags 1–3 suggests strong dependence between months. The gradual decay of the ACF indicates long-term memory, meaning current mining trends are influenced by many prior months.
 
-# Plot - the observed and reconstructed are on a different scale 
-ggplot(cmp, aes(month_date)) +
-  geom_line(aes(y = mel_obs, colour = "Observed")) +
-  geom_line(aes(y = mel_reconstructed, colour = "Reconstructed")) +
-  labs(title = "Greater Melbourne: Observed vs Reconstructed",
-       y = "Index") +
-  theme_minimal()
+* Summary stat: The series predominantly remains below zero, is right-skewed with large positive spikes and shows distinct regime shifts, indicating it is a non-stationary process.
 
+```{r}
+# auto plot 
+mining_trend |> 
+  autoplot(mining) + 
+  labs(title = "Mining Trend", x = "Month", y = "Index") 
+
+# seasonal plot 
+mining_trend |> 
+  gg_season(mining) +  
+  labs(title = "Seasonal Plot of Mining Trend", x = "Month", y = "Index")
+
+# seasonal sub-series plot 
+mining_trend |> 
+  gg_subseries(mining) +
+  labs(title = "Seasonal Subseries Plot of Mining Trend", x = "Month", y = "Index")
+
+# ACF plot 
+mining_trend |> 
+  ACF(mining) |> 
+  autoplot() +
+  labs(title = "ACF of Mining Trend", x = "Lag",y = "ACF")
+
+# summary stat 
+summary(mining_trend$mining)
+cat("Standard Deviation:", sd(mining_trend$mining), "\n")
+```
+
+## Model Fitting 
+
+```{r eval = FALSE}
+# ECM 
+# Result shows no cointegration found
+city <- city_indexes |> 
+  transmute(
+    month = yearmonth(floor_date(as.Date(month_date), "month")),
+    bris = as.numeric(greater_brisbane),
+    syd  = as.numeric(greater_sydney)
+  ) |>
+  as_tsibble(index = month) 
+
+# ADF test 
+adf_bris_lvl <- ur.df(city$bris, type="trend", selectlags="AIC")
+adf_syd_lvl  <- ur.df(city$syd,  type="trend", selectlags="AIC")
+adf_bris_diff<- ur.df(diff(city$bris), type="none", selectlags="AIC")
+adf_syd_diff <- ur.df(diff(city$syd),  type="none", selectlags="AIC")
+
+# Long-run regression (Bris on Syd)
+cn_lm <- lm(bris ~ syd, data = as.data.frame(city))
+alpha <- coef(cn_lm)[2]
+ect   <- resid(cn_lm)     
+
+# ADF on residuals 
+adf_ect <- ur.df(ect, type="none", selectlags="AIC")
+summary(adf_ect)        
+```
+
+
+### ARIMA models 
+```{r}
+# Unitroot test 
+unitroot_nsdiffs(mining_trend$mining)
+unitroot_ndiffs(mining_trend$mining) #suggested d = 1 
+
+# Plan A: Piecewise ARIMA with step dummies (WIP)
+
+# Plan B: STL + ARIMA 
+#mining_stl <- mining_trend |> 
+ # model(stl = STL(mining))
+
+#mining_stl |> 
+ # components() |> 
+  #autoplot() +
+  #labs(title = "STL Decomposition of Mining Trend")
+
+modb <- mining_trend %>%
+  model(STL_ARIMA =
+          decomposition_model(
+            STL(mining ~ season(window = "periodic")),
+            ARIMA(season_adjust, stepwise=FALSE, approximation=FALSE),
+            SNAIVE(season_year)
+          ))
+
+report(modb)
+gg_tsresiduals(modb)
+
+fcb <- forecast(modb, h = 12)
+autoplot(fcb, mining_trend)
 ```
 
 
