@@ -224,3 +224,4 @@ autoplot(fcb, mining_trend)
 
 
 
+

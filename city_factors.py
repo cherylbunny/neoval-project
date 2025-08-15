@@ -12,7 +12,7 @@ data_path = os.path.join(paper_path, 'data')
 
 if __name__ == '__main__':
 
-    df = pd.read_csv(os.path.join(data_path, 'city_indexes.csv'))
+    df = pd.read_csv(os.path.join(data_path, 'df_factor_trends.csv'))
     df_pcs = pd.read_csv(os.path.join(data_path, 'df_pcs.csv'))
     df_p = df_pcs.pivot(columns='mode', index='period', values='pc_value')
 
@@ -24,8 +24,8 @@ if __name__ == '__main__':
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
 
-    # Left y-axis: Brisbane minus Sydney
-    series1 = df['GREATER BRISBANE'] - df['GREATER SYDNEY']
+    # Left y-axis: Brisbane - Sydney spread
+    series1 = df['mining']
     ax1.plot(series1.index, series1, color='tab:blue', label='Greater Brisbane − Greater Sydney')
     ax1.set_ylabel('House Price Index Difference\n(Brisbane − Sydney, % growth)', color='tab:blue')
     ax1.tick_params(axis='y', labelcolor='tab:blue')
