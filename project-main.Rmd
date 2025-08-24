@@ -138,13 +138,11 @@ p7 + p8
 * Both series has very high autocorrelation with slow decay across many lags, indicating strong dependence on many prior months, though the variation of δBS is much more bounded than U. 
 
 
-## Engle–Granger Cointegration Test
+## Cointegration Test on Price Index between Brisbane and Sydney 
 
-We use the Engle–Granger procedure to test whether Brisbane and Sydney index levels are cointegrated, that is - whether each series is non-stationary but some linear combination is stationary, implying a stable long-run relationship.
+We use the Engle–Granger procedure to test whether the **raw Brisbane and Sydney price index** (from `city_index` data set) levels are cointegrated, that is - whether each series is non-stationary but some linear combination is stationary, implying a stable long-run relationship. 
 
-The test statistic is –1.098, so we fail to reject the unit-root null. This result indicates no cointegration between the raw Brisbane and Sydney levels and the residuals are non-stationary, which means a single long-run equilibrium is not supported.
-
-We therefore model a factor model and treat δBS as an informative second factor (a proxy for PC2), rather than assuming a tight long-run equilibrium between Brisbane and Sydney levels.
+The purpose of this test is to decide whether to regress the raw Brisbane index (μ Brisbane) on the raw Sydney index (μ Sydney) to obtain the coefficient, or to continue using the current δBS, which is derived by regressing the Sydney and Brisbane price indexes on the national trend U first.
 
 ```{r}
 # Build monthly series of levels
@@ -172,6 +170,9 @@ adf_ect <- ur.df(ect, type = "none", selectlags = "AIC")
 summary(adf_ect)
 ```
 
+The test statistic is –1.098, so we fail to reject the unit-root null. This result indicates no cointegration between the raw Brisbane and Sydney levels and the residuals are non-stationary, which means a single long-run equilibrium is not supported.
+
+We therefore model a factor model and treat the current δBS as an informative second factor (a proxy for PC2), rather than assuming a tight long-run equilibrium between Brisbane and Sydney levels.
 
 ## Sydney-Brisbane Spread vs National Trend
 
@@ -191,13 +192,19 @@ Combined, these methods integrate descriptive analysis, statistical modelling, a
 
 In the first part, we compared δBS and U using overall statistics and rolling-window measures.
 
-The global summary covered standard deviation, interquartile range, median absolute deviation, and total range to capture different aspects of spread.
+* The global summary (entire time period) of δBS and U covered several different measures, each of them captures different aspect of spread. The statistics includes: 
+  * Standard deviation: The average distance of each observation to the series mean. If δBS has a smaller standard deviation than U, it indicates that δBS is more stable and less volatile over the entire period.
+  * Interquartile range: The spread of the medium 50% of the data, if δBS has a tighter interquartile range than U, then it is generally more stable. 
+  * Median absolute deviation: The median of absolute deviations from the mean. This measure is more robust to outliers. If the value of δBS is lower than U, it indicates that δBS has less extreme fluctuations.
+  * Total range: The difference between the maximum and minimum values in the series, which examines the extreme swings in the series.  
 
-We then used 12-month and 24-month rolling windows: 12 months to match a typical year and 24 months to smooth short-term noise while showing medium-term trends.
+We next applied rolling windows of 12 and 24 months to the same statistics. Rather than using the entire time span at once, this approach slides a fixed-length window along the series, calculating the variability measures at each step using only the most recent 12 or 24 months of data. This method highlights how the volatility and dispersion of δBS and U evolve over time. 
 
-For clarity, we focused on two key plots: the 12-month rolling standard deviation for short-run volatility, and the 24-month rolling range for longer-run swings.
+We use 12-month windows to smooth short-term fluctuations and capture typical annual housing cycles, helping assess if volatility is bounded within a year. The 24-month windows extend the view, showing whether this boundedness holds beyond yearly patterns and reflecting medium-term events.
 
-Finally, we calculated the proportion of time in which δBS had a lower spread than U, giving a simple measure of how often it was more bounded.
+To keep the report concise, we highlight two plots: the 12-month rolling standard deviation for short-term volatility and the 24-month rolling range for longer-term fluctuations.
+
+Finally, we calculated the proportion of time (by 12 and 24 months respectively) in which δBS had a lower spread than U, giving a simple measure of how often it was more bounded.
 
 ```{r}
 # Load df 
@@ -332,30 +339,48 @@ While the rolling-window plots and statistics give a more detailed picture:
 
 * The 24-month rolling range plot shows δBS has wider swings at times, but also periods where it is more stable than U, highlighting its tendency to avoid large swings over longer periods.
 
-* δBS has a lower spread than U in around 38.6% of the time for 12-month windows and 41.0% for 24-month windows, indicating it is more bounded (however, less than half the time) in rolling windows.
+* δBS has a lower spread than U in around 38.6% of the time for 12-month windows and 41.0% for 24-month windows, indicating it is more bounded (however less than half the time) in rolling windows.
 
 ### 2. ARIMA Forecasting Comparison
 
 Following the descriptive analysis, in this section, we take a model-based approach to assess boundedness. 
 
-We applied auto ARIMA to both δBS and U time series to produce 10-year ahead forecasts, with the sole purpose of comparing their long-term prediction interval widths. Using auto selection ensures each series is modelled appropriately without over-focusing on manual parameter tuning, keeping the emphasis on interval comparison as a measure of future boundedness.
+We applied auto ARIMA to both δBS and U time series to produce 10-year ahead forecasts, with the sole purpose of comparing their long-term prediction interval widths. 
+
+**Using auto selection ensures each series is modelled appropriately without over-focusing on manual parameter tuning, keeping the emphasis on interval comparison as a measure of future boundedness.**
 
 ```{r}
 # Transform df to tsibble 
 factor_trends_ts <- factor_trends |>
-  transmute(date = as.Date(month_date),
+  transmute(date = yearmonth(month_date),
             U  = market,
-            BS = mining) 
+            BS = mining) |> 
+  as_tsibble(index = date)
 
-start_year  <- year(min(factor_trends_ts$date))
-start_month <- month(min(factor_trends_ts$date))
-ts_U  <- ts(factor_trends_ts$U,  frequency = 12, start = c(start_year, start_month))
-ts_BS <- ts(factor_trends_ts$BS, frequency = 12, start = c(start_year, start_month))
+# Fit ARIMA models 
+fit_U <- factor_trends_ts |>
+  model(
+    auto_U = ARIMA(U),
+    rw_drift  = ARIMA(U ~ 1 + pdq(0,1,0) + PDQ(0,0,0))
+  )
 
-# Fit auto ARIMA
-fit_U  <- auto.arima(ts_U,  stepwise = FALSE, approximation = FALSE)
-fit_BS <- auto.arima(ts_BS, stepwise = FALSE, approximation = FALSE)
+fit_BS <- factor_trends_ts |>
+  model(auto_BS = ARIMA(BS ~ pdq() + PDQ(0,0,0))) # exclude seasonality 
 
+# Compare AICc values
+fit_U |>
+  select(auto_U, rw_drift) |>
+  glance() |>
+  select(model = .model, AICc) 
+```
+
+The auto ARIMA model selected ARIMA(0,2,0)(2,0,0)[12] for the national trend U and ARIMA(1,1,2) for the Brisbane–Sydney spread δBS. We have also examined the residuals of both fitted models, which appear to be white noise, indicating that the models adequately capture the underlying dynamics of both series.
+
+Since applying two levels of differencing implies a quadratic trend, it may indicate over-differencing for an economic series that exhibits drift. Our visual inspection already suggests the presence of drift, and an Augmented Dickey–Fuller test (run separately) further confirms this with a Phi statistic significant at the 5% level. To avoid clutter, we do not include the test output in this report.
+
+Given this, we manually fitted an ARIMA(0,1,0) model with a constant (random walk with drift) in parallel for U and compared its AICc value against the auto-selected ARIMA model. The auto ARIMA model is objectively better by AICc and diagnostics, so we will report the auto ARIMA for completeness but also include an ARIMA(1,0,1) with a constant as a benchmark for comparison since it has a stronger intuition. 
+
+```{r}
 # Forecast - 10 years
 h <- 120
 fc_U  <- forecast(fit_U,  h = h, level = c(80, 95))
@@ -374,77 +399,73 @@ summary_fc_int<- tibble(
   mean_int_BS = c(fc_int(fc_BS, 80), fc_int(fc_BS, 95))
 ) 
 
-kable(summary_fc_int, caption = "Average Forecast Intervals for δBS and U")
+# kable(summary_fc_int, caption = "Average Forecast Intervals for δBS and U")
 
 # Plot the forecasts
-autoplot(fc_U)
-autoplot(fc_BS) 
-
-# Residuals seem like white noise - bell shaped + no autocorrelation from ACF 
-#checkresiduals(fit_U) 
-#checkresiduals(fit_BS)
+autoplot(fc_U, factor_trends_ts)
+autoplot(fc_BS, factor_trends_ts) 
 ```
 
-From the average 10-year forecast intervals, the δBS spread has consistently narrower prediction ranges compared to the U trend, suggesting it is likely to stay more contained over the next decade, as supported by both the summary table and the visual patterns in the forecast plots.
+From the forecast fan plot, we can first see that the random walk with drift produces very narrow forecast intervals, because it assumes only linear variance growth with horizon and ignores short-run autocorrelation. By contrast, the auto-ARIMA specification captures AR and MA dynamics, which propagate uncertainty further into the future, resulting in wider intervals. 
+
+The two alternative models for the national trend U lead to very different conclusions when compared with δBS. The random walk with drift produces unrealistically narrow intervals, while the auto-ARIMA specification not only achieves a much lower AICc but also yields forecast intervals that better reflect the underlying uncertainty. For this reason, we continue with the auto-ARIMA model in our boundedness comparison.
+
+Based on the average 10-year forecast ranges, the δBS spread consistently shows narrower prediction intervals than the national trend U. This indicates that the spread is likely to remain more contained over the next decade, a conclusion supported by both the summary statistics and the forecast visualisations.
 
 ### 3. Simulation-Based Forecasting
 
-Next, we apply simulation-based forecasting through Monte Carlo methods, conducting simulations from the ARIMA models of U and δBS. We generate 5000 samples over the same horizon to compare their dispersion and assess the boundedness of δBS relative to U. 
+Next,We extend the analysis by applying simulation-based forecasting using bootstrap simulations on the fitted auto-ARIMA models for both the national index U and the Brisbane–Sydney spread δBS. A total of 5,000 sample paths were generated over the forecast horizon. This approach enables the capture of more complex dynamics and potential non-linearities that standard ARIMA models may overlook.
 
-This approach enables the capture of more complex dynamics and potential non-linearities that standard ARIMA models may overlook.
+Bootstrap simulation involves repeatedly resampling the residuals from the fitted ARIMA model and feeding them forward through the model structure. Each resample generates a single plausible future path of the index. 
+
+By replicating this procedure thousands of times, we build up an empirical distribution of possible forecast trajectories. From this simulated distribution, we can then extract measures such as forecast intervals, the interval widths and probabilities that entire forecast paths stay within specified historical bounds.
 
 ```{r}
 set.seed(123)
 
 # Simulation 
 n <- 5000 
-sim_U  <- replicate(n, simulate(fit_U,  nsim = h, future = TRUE, bootstrap = TRUE))
-sim_BS <- replicate(n, simulate(fit_BS, nsim = h, future = TRUE, bootstrap = TRUE))
+sim_U  <- fit_U |> 
+  select(auto_U) |> 
+  generate(h = h, times = n, bootstrap = TRUE)
 
-# Last observed level - MAD comparison 
-max_dev_stats <- function(sim, last) {
-  col_max_dev <- apply(abs(sim - last), 2, max)
-  c(
-    median_max_dev = median(col_max_dev),
-    p90_max_dev    = unname(quantile(col_max_dev, 0.90))
-  )
-}
-
-# Historical 90% bands - stay in band prob 
-stay_prob <- function(sim, lo, hi) {
-  col_min <- apply(sim, 2, min)
-  col_max <- apply(sim, 2, max)
-  mean(col_min >= lo & col_max <= hi)
-}
-
-# MC bands and widths
-qdf <- function(mat) {
-  hh <- nrow(mat)
-  tibble(
-    step = seq_len(hh),
-    p50  = apply(mat, 1, median),
-    lo80 = apply(mat, 1, quantile, probs = 0.10),
-    hi80 = apply(mat, 1, quantile, probs = 0.90),
-    lo95 = apply(mat, 1, quantile, probs = 0.025),
-    hi95 = apply(mat, 1, quantile, probs = 0.975)
-  ) |>
-    mutate(width80 = hi80 - lo80,
-           width95 = hi95 - lo95)
-}
+sim_BS <- fit_BS %>%
+  generate(h = h, times = n, bootstrap = TRUE)
 ```
 
 ```{r}
-# End of horizon fan widths
-fan_U  <- qdf(sim_U)  |> mutate(series = "U")
-fan_BS <- qdf(sim_BS) |> mutate(series = "δBS")
-bands_all <- bind_rows(fan_U, fan_BS)
+bands_U <- sim_U %>%
+  as_tibble() %>%
+  group_by(date) %>%
+  summarise(
+    p50  = median(.sim, na.rm = TRUE),
+    lo80 = quantile(.sim, 0.10, na.rm = TRUE),
+    hi80 = quantile(.sim, 0.90, na.rm = TRUE),
+    lo95 = quantile(.sim, 0.025, na.rm = TRUE),
+    hi95 = quantile(.sim, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(width80 = hi80 - lo80, width95 = hi95 - lo95) %>%
+  mutate(series = "U")
 
-end_widths <- bands_all |>
-  group_by(series) |>
-  filter(step == max(step)) |>
-  summarise(width80_end = first(width80),
-            width95_end = first(width95),
-            .groups = "drop")
+bands_BS <- sim_BS %>%
+  as_tibble() %>%
+  group_by(date) %>%
+  summarise(
+    p50  = median(.sim, na.rm = TRUE),
+    lo80 = quantile(.sim, 0.10, na.rm = TRUE),
+    hi80 = quantile(.sim, 0.90, na.rm = TRUE),
+    lo95 = quantile(.sim, 0.025, na.rm = TRUE),
+    hi95 = quantile(.sim, 0.975, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  mutate(width80 = hi80 - lo80, width95 = hi95 - lo95) %>%
+  mutate(series = "δBS")
+
+# End of horizon fan widths
+end_widths <- bind_rows(bands_U, bands_BS) |> 
+  slice_max(order_by = date, n = 1, by = series) |> 
+  select(series, width80, width95)
 
 kable(end_widths, caption = "End of Horizon Fan Widths for δBS and U")
 ```
@@ -453,10 +474,33 @@ The fan width at the end of the forecast horizon indicates that the uncertainty 
 
 ```{r}
 # Stay in historical 90% band prob 
-hist_band_U  <- quantile(as.numeric(fit_U$x), c(0.05, 0.95))
-hist_band_BS <- quantile(as.numeric(fit_BS$x), c(0.05, 0.95))
-pr_U  <- stay_prob(sim_U, hist_band_U[1], hist_band_U[2])
-pr_BS <- stay_prob(sim_BS, hist_band_BS[1], hist_band_BS[2])
+lo_U  <- quantile(factor_trends_ts$U,  0.05, na.rm = TRUE)
+hi_U  <- quantile(factor_trends_ts$U,  0.95, na.rm = TRUE)
+lo_BS <- quantile(factor_trends_ts$BS, 0.05, na.rm = TRUE)
+hi_BS <- quantile(factor_trends_ts$BS, 0.95, na.rm = TRUE)
+
+pr_U <- sim_U |>
+  as_tibble() |>
+  group_by(.rep) |>
+  summarise(
+    path_min = min(.sim, na.rm = TRUE),
+    path_max = max(.sim, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  summarise(stay_90 = mean(path_min >= lo_U & path_max <= hi_U)) %>%
+  pull(stay_90)
+
+pr_BS <- sim_BS |>
+  as_tibble() |>
+  group_by(.rep) |>
+  summarise(
+    path_min = min(.sim, na.rm = TRUE),
+    path_max = max(.sim, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  summarise(stay_90 = mean(path_min >= lo_BS &
+                             path_max <= hi_BS)) %>%
+  pull(stay_90)
 
 stay_prob_tbl <- tibble(
   series = c("U", "δBS"),
@@ -470,15 +514,27 @@ kable(stay_prob_tbl, caption = "Probability of Staying in Historical 90% Band")
 
 ```{r}
 # MAD over horizon 
-last_U  <- tail(as.numeric(fit_U$x),  1)
-last_BS <- tail(as.numeric(fit_BS$x), 1)
-md_U  <- max_dev_stats(sim_U,  last_U)
-md_BS <- max_dev_stats(sim_BS, last_BS)
+last_U  <- factor_trends_ts |> slice_max(date, n = 1) |> pull(U)
+last_BS <- factor_trends_ts |> slice_max(date, n = 1) |> pull(BS)
 
-max_dev_tbl <- tibble(
-  series          = c("U", "δBS"),
-  median_max_dev  = c(md_U["median_max_dev"],  md_BS["median_max_dev"]),
-  p90_max_dev     = c(md_U["p90_max_dev"],     md_BS["p90_max_dev"])
+devs_U <- sim_U |>
+  group_by(.rep) |>
+  summarise(max_dev = max(abs(.sim - last_U), na.rm = TRUE), .groups = "drop")
+
+devs_BS <- sim_BS |>
+  group_by(.rep) |>
+  summarise(max_dev = max(abs(.sim - last_BS), na.rm = TRUE), .groups = "drop")
+
+md_U_median <- median(devs_U$max_dev, na.rm = TRUE)
+md_U_p90    <- quantile(devs_U$max_dev, 0.90, na.rm = TRUE)
+
+md_BS_median <- median(devs_BS$max_dev, na.rm = TRUE)
+md_BS_p90    <- quantile(devs_BS$max_dev, 0.90, na.rm = TRUE)
+
+max_dev_tbl <- tibble::tibble(
+  series         = c("U", "δBS"),
+  median_max_dev = c(md_U_median, md_BS_median),
+  p90_max_dev    = c(md_U_p90,    md_BS_p90)
 )
 
 kable(max_dev_tbl, caption = "Maximum Deviation Statistics for δBS and U")
