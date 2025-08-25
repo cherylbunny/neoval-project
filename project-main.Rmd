@@ -2,7 +2,9 @@
 title: "Co-movement and Growth in Housing Markets: from PCA to cointegration and factor models"
 author: "Yiran Yao"
 date: "2025-08-04"
-output: html_document
+output:
+  html_document:
+    css: styles.css
 ---
 
 ```{r setup, include=FALSE}
@@ -10,8 +12,8 @@ knitr::opts_chunk$set(echo = FALSE,
                       message = FALSE, 
                       warning = FALSE, 
                       fig.align = "center",
-                      fig.width = 10, 
-                      fig.height = 5
+                      fig.width = 8, 
+                      fig.height = 4
                       )
 ```
 
@@ -541,3 +543,49 @@ kable(max_dev_tbl, caption = "Maximum Deviation Statistics for δBS and U")
 ```
 
 Over the forecast horizon, the mean absolute deviation indicates that δBS exhibits both a lower median deviation and a lower 90th-percentile maximum deviation compared to U.
+
+## Evaluating δBS as a Proxy for PC2
+
+Following the earlier evaluation of cointegration and boundedness, we next assess whether the constructed δBS can serve as a valid proxy for PC2 in the factor model. This assessment is carried out by visually comparing the shape of the two standardised series and statistically testing their correlation.
+
+The two series display very similar shapes, with a high correlation (>96%). The scatterplot illustrates why they are not identical: the points form loops rather than a perfect diagonal, reflecting small lead–lag effects as housing cycles unfold. This arises because PC2 is a statistical construct from PCA, while δBS is a regression-based Sydney–Brisbane spread. Nevertheless, given the very high correlation, δBS can be considered a valid proxy for PC2 in the factor model, with the minor differences not being statistically significant.”
+
+```{r}
+# Extract variables BS and PC2 
+BS <- factor_trends |>
+  select(month_date, mining) |>
+  rename("period" = "month_date")
+
+Z2 <- pcs |> 
+  select(mode, pc_value, period) |> 
+  filter(mode == 1) |>
+  select(-mode)
+
+# Join and scale with mean 0 variance 1
+compare_BS_Z2 <- BS |>
+  inner_join(Z2, by = "period") |>
+  mutate(
+    mining_std = as.numeric(scale(mining, center = TRUE, scale = TRUE)), 
+    z2_std     = as.numeric(scale(pc_value, center = TRUE, scale = TRUE))
+  )
+
+# Plot the series 
+ggplot(compare_BS_Z2, aes(x = as.Date(period))) +
+  geom_line(aes(y = mining_std, colour = "δBS (Mining factor)")) +
+  geom_line(aes(y = z2_std, colour = "PC2 (z2)")) +
+  labs(x = "Period", y = "Index Value", colour = "Series") +
+  theme_minimal()
+
+# Calculate and plot the correlation  
+BS_Z2_corr <- cor(compare_BS_Z2$mining, compare_BS_Z2$pc_value, use = "complete.obs")
+cat("Correlation between δBS (mining) and PC2 (Z2):", BS_Z2_corr, "\n")
+
+ggplot(compare_BS_Z2, aes(x = pc_value, y = mining)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm",
+              se = FALSE,
+              colour = "red") +
+  labs(title = "Correlation between δBS (Mining factor) and PC2", x = "PC2 (Z2)", y = "δBS (Mining)") +
+  theme_minimal()
+```
+
