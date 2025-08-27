@@ -29,13 +29,17 @@ if __name__ == '__main__':
     region=parser.parse_args().region
 
     S_market=df_coefs.loc[region, 'market'] * df['market']
-    S = S_market  + df_coefs.loc[region, 'mining'] * df['mining']
+    S_BS = df_coefs.loc[region, 'mining'] * df['mining']
+    S_L = df_coefs.loc[region, 'lifestyle'] * df['lifestyle']
+    S2 = S_market  + S_BS
+    S3 = S2 + S_L
 
     plt.close()
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
     ax1.plot(df_indexes['month_date'], S_market, label='market')
-    ax1.plot(df_indexes['month_date'], S, label='market + factor 2')
+    ax1.plot(df_indexes['month_date'], S2, label='market + factor 2')
+    ax1.plot(df_indexes['month_date'], S3, label='market + factor 2 + factor 3')
     ax1.plot(df_indexes['month_date'], df_indexes[region], label='actual index')
     ax1.legend()
     ax1.set_title(region)
