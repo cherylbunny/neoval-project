@@ -22,6 +22,7 @@ library(tidyverse)
 library(janitor)
 library(lubridate)
 library(forecast)
+library(fabletools)
 library(fpp3)
 library(urca)
 library(broom)
@@ -30,11 +31,14 @@ library(scales)
 library(slider)
 library(kableExtra)
 library(patchwork)
+library(sf)
+library(distributional) 
 #library(plotly)
 ```
 
 ```{r load-clean-data}
 city_indexes <- read_csv("data/city_indexes.csv")
+sa4_indexes <- read_csv("data/indexes_city_and_sa4.csv")
 factor_trends <- read_csv("data/df_factor_trends.csv")
 reg_coefs <- read_csv("data/df_reg_coefs.csv")
 
@@ -42,10 +46,11 @@ pcs <- read_csv("data/df_pcs.csv")
 eofs_city <- read_csv("data/df_eofs_city.csv")
 eofs <- read_csv("data/df_eofs.csv")
 
+sa4 <- st_read("data/SA4_2021_AUST_SHP_GDA2020/SA4_2021_AUST_GDA2020.shp", quiet = TRUE)
+
 city_indexes <- city_indexes |> 
   clean_names() 
 ```
-
 
 # Introduction 
 
@@ -190,7 +195,7 @@ We approach this assumption from 3 angles:
 
 Combined, these methods integrate descriptive analysis, statistical modelling, and stochastic simulation to rigorously assess whether δBS is more bounded than U.
 
-### 1. Statistical Comparison 
+### Statistical Comparison 
 
 In the first part, we compared δBS and U using overall statistics and rolling-window measures.
 
@@ -343,13 +348,13 @@ While the rolling-window plots and statistics give a more detailed picture:
 
 * δBS has a lower spread than U in around 38.6% of the time for 12-month windows and 41.0% for 24-month windows, indicating it is more bounded (however less than half the time) in rolling windows.
 
-### 2. ARIMA Forecasting Comparison
+### ARIMA Forecasting Comparison
 
 Following the descriptive analysis, in this section, we take a model-based approach to assess boundedness. 
 
 We applied auto ARIMA to both δBS and U time series to produce 10-year ahead forecasts, with the sole purpose of comparing their long-term prediction interval widths. 
 
-**Using auto selection ensures each series is modelled appropriately without over-focusing on manual parameter tuning, keeping the emphasis on interval comparison as a measure of future boundedness.**
+Using auto selection ensures each series is modelled appropriately without over-focusing on manual parameter tuning, keeping the emphasis on interval comparison as a measure of future boundedness.
 
 ```{r}
 # Transform df to tsibble 
@@ -359,21 +364,106 @@ factor_trends_ts <- factor_trends |>
             BS = mining) |> 
   as_tsibble(index = date)
 
-# Fit ARIMA models 
-fit_U <- factor_trends_ts |>
+# U is non stationary, I(1)
+adf_U <- ur.df(factor_trends_ts$U, type="trend", lags=12)
+kpss_U <- kpss.test(factor_trends_ts$U, null="Trend")
+# BS also I(1)
+adf_BS <- ur.df(factor_trends_ts$BS, type="drift", lags=12) 
+kpss_BS <- kpss.test(factor_trends_ts$BS, null="Level")
+# BS is stationary with a single structural break at position 53: "2002 Oct"
+za <- ur.za(factor_trends_ts$BS, model = "both") 
+```
+
+U: big, smooth upward trend; seasonality is tiny (order 0.003–0.004 vs level ~1.5+); remainder has multi-year waves. 
+BS: oscillates around ~0; no permanent trend; seasonality tiny; long multi-year swings; we also found a structural break (ZA test).
+```{r}
+# STL decompo plots 
+U_stl <- factor_trends_ts |> 
+  model(stl = STL(U))
+
+U_stl |> 
+  components() |> 
+  autoplot() +
+  labs(title = "STL Decomposition of National Trend U")
+
+ggtsdisplay(factor_trends_ts$U, main = "ACF and PACF with National Trend U")
+
+BS_stl <- factor_trends_ts |> 
+  model(stl = STL(BS))
+
+BS_stl |> 
+  components() |> 
+  autoplot() +
+  labs(title = "STL Decomposition of Mining Trend BS")
+
+ggtsdisplay(factor_trends_ts$BS, main = "ACF and PACF with Mining Trend BS")
+```
+
+```{r}
+# Split testing and training 
+train_U <- factor_trends_ts |> 
+  select(date, U) |>
+  filter(date < yearmonth("2023 Jan")) 
+
+test_U <- factor_trends_ts |> 
+  select(date, U) |>
+  filter(date >= yearmonth("2023 Jan")) 
+
+train_BS <- factor_trends_ts |> 
+  select(date, BS) |>
+  filter(date < yearmonth("2023 Jan"))
+
+test_BS <- factor_trends_ts |> 
+  select(date, BS) |>
+  filter(date >= yearmonth("2023 Jan"))
+```
+
+
+```{r}
+# Add knots 
+add_pw <- function(df){
+  df %>%
+    mutate(
+      D_2008 = as.integer(date >= yearmonth("2008-01")), # GFC/credit conditions shift
+      D_2012 = as.integer(date >= yearmonth("2012-01")), # end of the mining-investment boom / regime change
+      R_2020 = pmax(0, (year(date) - 2020) * 12 + (month(date) - 3)) #covid 
+    )
+}
+train_U <- add_pw(train_U)
+test_U  <- add_pw(test_U)
+
+# Fitting U - ETS need to transform the data 
+fit_U <- train_U %>%
   model(
-    auto_U = ARIMA(U),
-    rw_drift  = ARIMA(U ~ 1 + pdq(0,1,0) + PDQ(0,0,0))
+    rw_drift  = ARIMA(U ~ 1 + pdq(0,1,0)),                 # RW + drift - benchmark 
+  #  arima011  = ARIMA(U ~ 1 + pdq(0,1,1)),                 # (0,1,1) with drift
+    arima211  = ARIMA(U ~ 1 + pdq(2,1,1) + fourier(K = 2)),                # (2,1,1) with drift + 6-month harmonic
+  #  ets_damp  = ETS(  U ~ error("A") + trend("Ad") + season("N")),  # ETS damped trend
+  #  piecewise = ARIMA(U ~ 1 + pdq(0,1,0) + D_2008 + D_2012 + R_2020) # piecewise
+  #  ets_auto = ETS(U)
   )
 
-fit_BS <- factor_trends_ts |>
-  model(auto_BS = ARIMA(BS ~ pdq() + PDQ(0,0,0))) # exclude seasonality 
+# Examine fit  
+glance(fit_U) |> arrange(AICc)
 
-# Compare AICc values
-fit_U |>
-  select(auto_U, rw_drift) |>
-  glance() |>
-  select(model = .model, AICc) 
+fit_U |> 
+  select(arima211) |>
+  gg_tsresiduals()
+
+# Ljung-Box test
+lb_U <- bind_rows(
+  augment(fit_U |> select(rw_drift))  |> features(.innov, ljung_box, lag=12, dof=0) |> mutate(.model="rw_drift"),
+ # augment(fit_U |> select(arima011)) |> features(.innov, ljung_box, lag=12, dof=1) |> mutate(.model="arima011"),
+  augment(fit_U |> select(arima211)) |> features(.innov, ljung_box, lag=12, dof=1) |> mutate(.model="arima111"),
+ # augment(fit_U |> select(piecewise))|> features(.innov, ljung_box, lag=12, dof=0) |> mutate(.model="piecewise"),
+  #augment(fit_U |> select(ets_damp)) |> features(.innov, ljung_box, lag=12, dof=0) |> mutate(.model="ets_damp")
+) |> print()
+
+fc_U <- fit_U |> 
+  select(arima211, rw_drift) |> 
+  forecast(test_U, level = c(80,95))
+
+autoplot(fc_U, test_U) + scale_fill_brewer(palette = "Blues") + labs(title = "Forecasts on Test Set for U")
 ```
 
 The auto ARIMA model selected ARIMA(0,2,0)(2,0,0)[12] for the national trend U and ARIMA(1,1,2) for the Brisbane–Sydney spread δBS. We have also examined the residuals of both fitted models, which appear to be white noise, indicating that the models adequately capture the underlying dynamics of both series.
@@ -385,27 +475,45 @@ Given this, we manually fitted an ARIMA(0,1,0) model with a constant (random wal
 ```{r}
 # Forecast - 10 years
 h <- 120
-fc_U  <- forecast(fit_U,  h = h, level = c(80, 95))
-fc_BS <- forecast(fit_BS, h = h, level = c(80, 95))
+fc_U  <- fabletools::forecast(fit_U,  h = h, level = c(80, 95))
+# fc_BS <- fabletools::forecast(fit_BS, h = h, level = c(80, 95))
 
-# Compute average forecast intervals 
-fc_int <- function(fc, level) {
-  col <- fc$level == level
-  mean(fc$upper[, col] - fc$lower[, col])
-}
+# Fan width 
+  fcbands_U <- fc_U |> 
+  as_tibble() |> 
+  mutate(
+    lo80 = quantile(U, 0.10),
+    hi80 = quantile(U, 0.90),
+    lo95 = quantile(U, 0.025),
+    hi95 = quantile(U, 0.975),
+    width80 = hi80 - lo80,
+    width95 = hi95 - lo95
+  ) |> 
+  select(.model, date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
+  
+width_summary <- fcbands_U |>
+  group_by(.model) |> 
+  summarise(
+    width80_range = max(width80) - min(width80),
+    width95_range = max(width95) - min(width95)
+  ) |> print()
 
-summary_fc_int<- tibble(
-  period_months = h,
-  level = c(80, 95),
-  mean_int_U = c(fc_int(fc_U, 80), fc_int(fc_U, 95)),
-  mean_int_BS = c(fc_int(fc_BS, 80), fc_int(fc_BS, 95))
-) 
+last_row <- fcbands_U |> filter(date == max(date))
 
-# kable(summary_fc_int, caption = "Average Forecast Intervals for δBS and U")
+# Forecast plot with fan width at last obs 
+autoplot(fc_U, factor_trends_ts) +
+  geom_segment(data = last_row,
+               aes(x = date, xend = date, y = lo80, yend = hi80, colour = .model),
+               linewidth = 0.8) +
+  geom_text(data = last_row,
+            aes(x = date, y = hi80,
+                label = sprintf("w80 = %.4f", width80),
+                colour = .model),
+            vjust = -0.6, size = 2.5)
 
 # Plot the forecasts
-autoplot(fc_U, factor_trends_ts)
-autoplot(fc_BS, factor_trends_ts) 
+#autoplot(fc_U, factor_trends_ts)
+# autoplot(fc_BS, factor_trends_ts) 
 ```
 
 From the forecast fan plot, we can first see that the random walk with drift produces very narrow forecast intervals, because it assumes only linear variance growth with horizon and ignores short-run autocorrelation. By contrast, the auto-ARIMA specification captures AR and MA dynamics, which propagate uncertainty further into the future, resulting in wider intervals. 
@@ -414,15 +522,7 @@ The two alternative models for the national trend U lead to very different concl
 
 Based on the average 10-year forecast ranges, the δBS spread consistently shows narrower prediction intervals than the national trend U. This indicates that the spread is likely to remain more contained over the next decade, a conclusion supported by both the summary statistics and the forecast visualisations.
 
-### 3. Simulation-Based Forecasting
-
-Next,We extend the analysis by applying simulation-based forecasting using bootstrap simulations on the fitted auto-ARIMA models for both the national index U and the Brisbane–Sydney spread δBS. A total of 5,000 sample paths were generated over the forecast horizon. This approach enables the capture of more complex dynamics and potential non-linearities that standard ARIMA models may overlook.
-
-Bootstrap simulation involves repeatedly resampling the residuals from the fitted ARIMA model and feeding them forward through the model structure. Each resample generates a single plausible future path of the index. 
-
-By replicating this procedure thousands of times, we build up an empirical distribution of possible forecast trajectories. From this simulated distribution, we can then extract measures such as forecast intervals, the interval widths and probabilities that entire forecast paths stay within specified historical bounds.
-
-```{r}
+```{r eval = FALSE}
 set.seed(123)
 
 # Simulation 
@@ -435,7 +535,7 @@ sim_BS <- fit_BS %>%
   generate(h = h, times = n, bootstrap = TRUE)
 ```
 
-```{r}
+```{r eval = FALSE}
 bands_U <- sim_U %>%
   as_tibble() %>%
   group_by(date) %>%
@@ -474,7 +574,7 @@ kable(end_widths, caption = "End of Horizon Fan Widths for δBS and U")
 
 The fan width at the end of the forecast horizon indicates that the uncertainty of U is approximately nine times greater than that of δBS.
 
-```{r}
+```{r eval = FALSE}
 # Stay in historical 90% band prob 
 lo_U  <- quantile(factor_trends_ts$U,  0.05, na.rm = TRUE)
 hi_U  <- quantile(factor_trends_ts$U,  0.95, na.rm = TRUE)
@@ -514,7 +614,7 @@ kable(stay_prob_tbl, caption = "Probability of Staying in Historical 90% Band")
 
 δBS exhibits a 26.0% probability of remaining within its historical 90% confidence band, whereas U demonstrates a 0% probability. 
 
-```{r}
+```{r eval = FALSE}
 # MAD over horizon 
 last_U  <- factor_trends_ts |> slice_max(date, n = 1) |> pull(U)
 last_BS <- factor_trends_ts |> slice_max(date, n = 1) |> pull(BS)
@@ -589,3 +689,144 @@ ggplot(compare_BS_Z2, aes(x = pc_value, y = mining)) +
   theme_minimal()
 ```
 
+## Baseline Factor Model Fit on SA4 regions
+
+### Identify under-performing regions
+
+We now turn to evaluating how well the factor model captures the variation in individual SA4 indexes.
+
+R² measures the share of variation in each SA4 housing index that our factor model explains. Across SA4 regions, the mean R² is approximately 0.988 and the median is 0.993, indicating the model captures almost all of the observed variation. 
+
+
+```{r}
+# Filter the SA4 regions in the coefficient data 
+reg_sa4 <- reg_coefs |> filter(region_level == "sa4_name")
+
+ggplot(reg_sa4, aes(x = r2)) +
+  geom_histogram(bins = 20) +
+  stat_bin(
+    bins = 20,
+    geom = "text",
+    aes(y = after_stat(count), label = after_stat(percent(
+      count / sum(count), accuracy = 1 # Add % for counts at each bar 
+    ))),
+    vjust = -0.4,
+    size = 3
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
+  labs(title = "Distribution of R² across SA4 regions", x = "R²", y = "Count")
+
+# Rank the regions by r2 and print top and bottom 15 
+ranked <- reg_sa4 |>
+  arrange(desc(r2)) |>
+  mutate(rank = row_number())
+
+top10 <- ranked |>
+  slice_head(n = 10) |>
+  transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
+
+bottom10 <- ranked |>
+  slice_tail(n = 10) |>
+  arrange(r2) |>
+  transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
+
+tbl_rank <- top10 |>
+  full_join(bottom10, by = "row", suffix = c("_Top", "_Bottom")) |>
+  select(Rank_Top, Region_Top, R2_Top, Rank_Bottom, Region_Bottom, R2_Bottom)
+
+kable(
+  tbl_rank,
+  caption = "Top 10 and Bottom 10 SA4 Regions by R²",
+  digits = 4,
+  col.names = c("Rank", "Region", "R\u00B2", "Rank", "Region", "R\u00B2"),
+  escape = FALSE
+) |>
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("striped", "condensed")) |>
+  add_header_above(c("Top 10" = 3, "Bottom 10" = 3)) |>
+  column_spec(1, width = "4em") |>
+  column_spec(4, width = "4em") |>
+  column_spec(3, width = "6em") |>
+  column_spec(6, width = "6em")
+```
+
+R² is tightly concentrated near 1.0 with the majority of SA4s exceed 0.98, with only a small left tail (a few around 0.92 – 0.95). The top and bottom lists identify the extremes and show recurring patterns across those regions: 
+
+* Top 10 regions: Concentrated in the large east-coast capitals and surrounding belts.
+* Bottom 10 regions : Dominated by Western Australia and Queensland’s mining exposed regions.
+
+```{r}
+# Match names between reg_sa4 and sa4 shapefile
+norm <- function(x) {
+  x |>
+    str_to_upper() |>
+    str_replace_all("&", "AND") |>
+    str_replace_all("[[:punct:]]", " ") |>
+    str_squish()
+}
+
+# Prepare the 88 regions to keep
+keep88 <- reg_sa4 |>
+  mutate(region_norm = norm(region)) |>
+  distinct(region_norm)
+
+# Clean shapefile + keep only the 88 + join r2 
+sa4_r2 <- sa4 |>
+  mutate(region_norm = norm(SA4_NAME21)) |>
+  # drop empty geometries and special ABS areas
+  filter(!st_is_empty(geometry)) |>
+  filter(!str_detect(region_norm, "^MIGRATORY\\s+OFFSHORE\\s+SHIPPING"),
+         !str_detect(region_norm, "^NO\\s+USUAL\\s+ADDRESS")) |>
+  semi_join(keep88, by = "region_norm") |> # Keep only the 88 sa4
+  left_join( # Join r2 
+    reg_sa4 |>
+      mutate(region_norm = norm(region)) |>
+      select(region_norm, r2),
+    by = "region_norm"
+  )
+
+# Plot the r2 distribution 
+ggplot(sa4_r2) +
+  geom_sf(aes(fill = r2), linewidth = 0.1) +
+  coord_sf() +
+  scale_fill_viridis_c(name = "R²") +
+  labs(title = "SA4 R² from factor model") +
+  theme_void()
+```
+
+The choropleth reinforces the findings from the summary table, as we can see that the east-coast capitals and coastal belts from Melbourne through Sydney into the South-East of Queensland show the strongest fit,  with most regional NSW/VIC also high. While fit weakens inland and to the west, notably across Western Australia and along Queensland’s mining belts; The dark purple areas mark the lowest R² and are typically remote and resource-exposed regions with possible boom–bust timing and sparse transactions that our three factors don’t fully capture.
+
+Hence, we’ll prioritise Western Australia and Queensland’s mining-exposed regions for residual diagnostics, where we expect autocorrelation and regime shifts for trial enhancements. 
+
+### Inspect residual 
+
+```{r}
+#pivot your SA4 index (wide → long)
+options(scipen = 999, digits = 10)
+
+sa4_indexes_long <- sa4_indexes |>
+  mutate(month_date = as.Date(month_date)) |>
+  pivot_longer(-month_date, names_to = "region", values_to = "y") 
+
+# Rename coefficients to avoid duplicates 
+coefs <- reg_sa4 |>
+  rename(beta_market = market,
+         beta_mining = mining,
+         beta_lifestyle = lifestyle)
+
+# compute fitted and residual for every r and t
+panel <- sa4_indexes_long |>
+  left_join(
+    factor_trends |>
+      mutate(month_date = as.Date(month_date)) |>
+      select(month_date, market, mining, lifestyle),
+    by = "month_date"
+  ) |>
+  left_join(coefs, by = "region") |>
+  mutate(
+    fitted = alpha + beta_market*market + beta_mining*mining + beta_lifestyle*lifestyle,
+    resid  = y - fitted
+  )
+```
+
+# Forecast with Factor Model 
