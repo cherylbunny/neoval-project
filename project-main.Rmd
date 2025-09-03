@@ -1,5 +1,6 @@
 ---
-title: "Co-movement and Growth in Housing Markets: from PCA to cointegration and factor models"
+title: "Housing Market Dynamics"
+subtitle: "From PCA to Factor Models"
 author: "Yiran Yao"
 date: "2025-08-04"
 output:
@@ -33,125 +34,201 @@ library(kableExtra)
 library(patchwork)
 library(sf)
 library(distributional) 
+library(glue)
+library(readxl)
 #library(plotly)
 ```
 
 ```{r load-clean-data}
+# Raw housing index 
 city_indexes <- read_csv("data/city_indexes.csv")
 sa4_indexes <- read_csv("data/indexes_city_and_sa4.csv")
+
+# PC proxy with identified characteristic
 factor_trends <- read_csv("data/df_factor_trends.csv")
+
+# Static regression coef 
 reg_coefs <- read_csv("data/df_reg_coefs.csv")
 
+# PC score and loadings 
 pcs <- read_csv("data/df_pcs.csv")
 eofs_city <- read_csv("data/df_eofs_city.csv")
 eofs <- read_csv("data/df_eofs.csv")
 
+# Economic data - need cleaning 
+#gdp_mining <- read_xlsx("data/data.xlsx")
+#exchange_rate <- read_xlsx("data/key_economic_data.xlsx")
+#mining_expenditure <- read_xlsx("data/mining_expenditure.xlsx", sheet = 2)
+
+# For plotting SA4 geo 
 sa4 <- st_read("data/SA4_2021_AUST_SHP_GDA2020/SA4_2021_AUST_GDA2020.shp", quiet = TRUE)
 
+# Cleaning city names 
 city_indexes <- city_indexes |> 
   clean_names() 
+```
+
+```{r compute-mining-ps}
+# Compute the Perth Sydney Spread 
+PS_raw <- city_indexes |> 
+  select(month_date, greater_sydney, greater_perth)
+
+U_raw <- factor_trends |> 
+  select(month_date, market) 
+
+com_PS <- PS_raw |> inner_join(U_raw, by = "month_date")
+
+# Extract the numeric values and compute alpha 
+mu_perth   <- com_PS$`greater_perth`
+mu_sydney  <- com_PS$`greater_sydney`
+U          <- com_PS$market   
+
+alpha <- cov(mu_perth, U, use = "complete.obs") /
+         cov(mu_sydney, U, use = "complete.obs")
+
+# Add in PS spread to factor_trend as mining_ps 
+com_PS <- com_PS |> 
+  mutate(mining_ps = `greater_perth` - alpha * `greater_sydney`) |> 
+  select(month_date, mining_ps)
+
+factor_trends <- factor_trends |> 
+  inner_join(com_PS, by = "month_date")
+```
+
+```{r find-pc3-proxy, eval = FALSE}
+# Prepare the data we need - city pc loadings, pc scores, lifestyle trend 
+pc3_pxy <- eofs_city |> 
+  filter(mode == 2) |> 
+  arrange(loading_value)
+
+Z3 <- pcs |> 
+  filter(mode == 2) |>  
+  select(period, pc_value)
+
+# Melbourne – Rest of QLD
+MQ_raw <- city_indexes |> 
+  select(month_date, rest_of_nsw, greater_melbourne)
+
+U_raw <- factor_trends |> 
+  select(month_date, market) 
+
+com_MQ <- MQ_raw |> inner_join(U_raw, by = "month_date")
+
+mu_rest_nsw   <- com_MQ$`rest_of_nsw`
+mu_melbourne  <- com_MQ$`greater_melbourne`
+U          <- com_MQ$market 
+
+alpha1 <- cov(mu_rest_nsw, U, use = "complete.obs") /
+         cov(mu_melbourne, U, use = "complete.obs")
+
+com_MQ <- com_MQ |> 
+  mutate(lifestyle_1 = `rest_of_nsw` - alpha1 * `greater_melbourne`) |> 
+  select(month_date, lifestyle_1)
+
+factor_trends_1 <- factor_trends |> 
+  inner_join(com_MQ, by = "month_date")
+
+lifestyle_cmp <- factor_trends_1 |> 
+  select(month_date, lifestyle, lifestyle_1) |>
+  rename(period = month_date) |> 
+  inner_join(Z3, by = "period") |> 
+  mutate(
+    z3_std     = as.numeric(scale(pc_value)),
+    lifestyleorg_std = as.numeric(scale(lifestyle)),
+    lifestyle1_std = as.numeric(scale(lifestyle_1))
+  )
+
+plot_lifestyle_cmp <- lifestyle_cmp |> 
+  select(period, z3_std, lifestyleorg_std, lifestyle1_std ) |> 
+  pivot_longer(-period, names_to = "series", values_to = "value") |> 
+  mutate(series = recode(series,
+                         z3_std = "PC3",
+                         lifestyleorg_std = "δlifestyle",
+                         lifestyle1_std = "nsw_mel")) |> 
+  ggplot(aes(x = as.Date(period), y = value, colour = series)) +
+  geom_line() +
+  labs(x = "Period", y = "Standardised value", colour = "Series",
+       title = "Current ") +
+  theme_minimal()
+
+plot_lifestyle_cmp 
 ```
 
 # Introduction 
 
 Traditional approaches to analysing housing indexes, such as hedonic or repeat-sales models, can introduce selection bias or violate underlying assumptions. Moreover, they fail to capture key regional, social, or macroeconomic factors that play a significant role in driving housing price movements.
 
-In the recent research Sijp et al. (2025) propose a new approach that applies Principal Component Analysis (PCA) to city-level housing indexes, enabling the extraction of key drivers of price movements and offering a deeper understanding of the forces shaping housing markets.
+In the recent research Sijp et al. (2025) propose a new approach that applies Principal Component Analysis (PCA) to regional SA4 level housing indexes, enabling the extraction of key drivers of price movements and offering a deeper understanding of the forces shaping housing markets.
 
 The PCA results show that the first three principal components capture much of the behaviour of local price indexes, as a linear combination of their time series explains most of the variance in the housing index. Nevertheless, the PCA-based linear model lacks robustness across different time windows, and its coefficient estimates must be derived directly from the PCA procedure.
 
 Our exploratory research extends the PCA approach by addressing these limitations through a factor linear model, which uses time series data directly, with independent variables serving as proxies for the PCA-derived principal components.
 
+# Moving from PCA to Factor Model (WIP)
 
-# Research Structure 
+The national trend (U) exhibits a close correspondence with PC1 (market), while the Perth–Sydney spread (δPS) aligns with PC2 (mining). Given that these principal components account for the majority of variance in the index, our preliminary analysis focuses on U and δPS, with subsequent extensions planned. (WIP - might add lifestyle)
 
-The national trend (U) exhibits a close correspondence with PC1 (market), while the Brisbane–Sydney spread (δBS) aligns with PC2 (mining). Given that these principal components account for the majority of variance in the index, our preliminary analysis focuses on U and δBS, with subsequent extensions planned.
+-   Explain on more of why did we move on from PCA to factor model
+-   Explain how did we find the factors (like how did we take national as PC1, PS as PC2...)
+-   Might move add cointegration test to this section if needed as it explains how we formulate the alpha 
 
-The research will focus on the following directions: 
+We examined whether PC2 is better represented by the Brisbane–Sydney or Perth–Sydney spread by comparing the shapes of the standardised series and testing their correlations with PC2. The Perth–Sydney spread aligns more closely with PC2: The scatterplot shows a distribution that falls more evenly along the regression line, and its correlation with PC2 is slightly higher (98% versus 96% for the Brisbane–Sydney spread). While the difference is minor and not statistically significant, the Perth–Sydney spread is the stronger candidate as a proxy for PC2.
 
-* Examine the characteristics of U and δBS. 
+```{r examine-pc-corr}
+# Join PC2 with both series 
+Z2 <- pcs |> 
+  filter(mode == 1) |>  
+  select(period, pc_value)
 
-* Evaluate whether the existing U-adjusted δBS should be employed in place of the “Brisbane on Sydney” spread derived from the bris ∼ syd regression for modelling purposes.
+mining_cmp <- factor_trends |> 
+  select(month_date, mining, mining_ps) |>
+  rename(period = month_date) |> 
+  inner_join(Z2, by = "period") |> 
+  mutate(
+    z2_std     = as.numeric(scale(pc_value)),
+    deltaBS_std = as.numeric(scale(mining)),
+    deltaPS_std = as.numeric(scale(mining_ps))
+  )
 
-* Whether the δBS serves as a more stable measure than U in the factor model.
+# Plot PC2 with both series 
+plot_ts <- mining_cmp |> 
+  select(period, z2_std, deltaBS_std, deltaPS_std) |> 
+  pivot_longer(-period, names_to = "series", values_to = "value") |> 
+  mutate(series = recode(series,
+                         z2_std = "PC2",
+                         deltaBS_std = "δBS",
+                         deltaPS_std = "δPS")) |> 
+  ggplot(aes(x = as.Date(period), y = value, colour = series)) +
+  geom_line() +
+  labs(x = "Period", y = "Standardised value", colour = "Series",
+       title = "PC2 vs δBS and δPS (standardised)") +
+  theme_minimal()
 
-* Whether the coefficient δ provides a valid replacement for PC2.
+# Compare correlation 
+corr_bs <- cor(mining_cmp$pc_value, mining_cmp$mining,   use = "complete.obs")
+corr_ps <- cor(mining_cmp$pc_value, mining_cmp$mining_ps, use = "complete.obs")
 
-* How well the factor model captures the variation in individual SA4 indexes.
+# Scatter plot 
+scatter_df <- mining_cmp |> 
+  select(pc_value, mining, mining_ps) |> 
+  pivot_longer(cols = c(mining, mining_ps),
+               names_to = "spread", values_to = "spread_value") |> 
+  mutate(spread = recode(spread,
+                         mining    = glue("δBS (r = {round(corr_bs, 3)})"),
+                         mining_ps = glue("δPS (r = {round(corr_ps, 3)})")))
 
-* How the model can be extended to a time-dependent version using moving windows with evolving coefficients.
+plot_scatter <- ggplot(scatter_df, aes(x = pc_value, y = spread_value)) +
+  geom_point(alpha = 0.5) +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ spread, scales = "free_y") +
+  labs(title = "PC2 vs spreads", x = "PC2", y = "Spread value") +
+  theme_minimal()
 
-
-## Exploratory Analysis 
-
-The exploratory analysis utilises visualisations to characterise the dynamics of the national trend (U) and the Brisbane–Sydney spread (δBS), thereby clarifying their underlying properties.
-
-```{r}
-factor_trend_ts <- factor_trends |>
-  transmute(
-    month_date = yearmonth(as.Date(month_date)),
-    U = as.numeric(market),
-    BS = as.numeric(mining)
-  ) |>
-  as_tsibble(index = month_date)
-
-# Time-series autoplot
-p1 <- factor_trend_ts |> autoplot(U) + labs(title = "U: National Trend", x = "Month", y = "Index")
-p2 <- factor_trend_ts |> autoplot(BS) + labs(title = "δBS: Brisbane–Sydney Spread", x = "Month", y = "Index")
-p1 + p2
+plot_ts
+plot_scatter 
 ```
 
-**Time plots:** 
-
-* U rises steadily from 2003 to 2012, transitions into a slower growth phase until 2019, then undergoes a sharp regime shift during 2020–2022 (the COVID period) followed by persistently elevated and volatile levels, with growth rates remaining time-varying throughout.
-
-* δBS displays a prolonged, uneven rise from 2003 to 2012, followed by a sharp regime shift, then COVID-related fluctuations, with the level adjusting and showing time-varying patterns.
-
-```{r}
-# Seasonal plots
-p3  <- factor_trend_ts |> gg_season(U) + labs(title = "Seasonal Plot: U", x = "Month", y = "Index")
-p4 <- factor_trend_ts |> gg_season(BS) + labs(title = "Seasonal Plot: δBS", x = "Month", y = "Index")
-p3 + p4
-```
-
-**Seasonal plots:**
-
-* U has apparent within-year slopes being dominated by the strong upward trend; no systematic month-of-year effects.
-
-* δBS shows little evidence of month-to-month seasonality, with no particular month standing out, though its overall level varies between years.
-
-```{r}
-# Seasonal subseries
-p5 <- factor_trend_ts |> gg_subseries(U) + labs(title = "Seasonal Subseries: U", x = "Month", y = "Index")
-p6 <- factor_trend_ts |> gg_subseries(BS) + labs(title = "Seasonal Subseries: δBS", x = "Month", y = "Index")
-p5 + p6
-```
-
-**Seasonal sub-series plot:** 
-
-* Each monthly panel of U shows a steady upward rise with mean value across months remaining similar, reinforcing that the series is driven more by trend than by seasonality.
-
-* The δBS seasonal sub-series plot reinforces the lack of a dominant seasonal pattern, as the monthly profiles are similar in shape and the corresponding means remain relatively flat and close to zero.
-
-```{r}
-# ACF
-p7  <- factor_trend_ts |> ACF(U) |> autoplot() + labs(title = "ACF: U", x = "Lag", y = "ACF")
-p8 <- factor_trend_ts |> ACF(BS) |> autoplot() + labs(title = "ACF: δBS", x = "Lag", y = "ACF")
-p7 + p8
-```
-
-**ACF plot:** 
-
-* Both series has very high autocorrelation with slow decay across many lags, indicating strong dependence on many prior months, though the variation of δBS is much more bounded than U. 
-
-
-## Cointegration Test on Price Index between Brisbane and Sydney 
-
-We use the Engle–Granger procedure to test whether the **raw Brisbane and Sydney price index** (from `city_index` data set) levels are cointegrated, that is - whether each series is non-stationary but some linear combination is stationary, implying a stable long-run relationship. 
-
-The purpose of this test is to decide whether to regress the raw Brisbane index (μ Brisbane) on the raw Sydney index (μ Sydney) to obtain the coefficient, or to continue using the current δBS, which is derived by regressing the Sydney and Brisbane price indexes on the national trend U first.
-
-```{r}
+```{r cointegration-test, eval = FALSE}
 # Build monthly series of levels
 city <- city_indexes |>
   transmute(
@@ -177,207 +254,103 @@ adf_ect <- ur.df(ect, type = "none", selectlags = "AIC")
 summary(adf_ect)
 ```
 
-The test statistic is –1.098, so we fail to reject the unit-root null. This result indicates no cointegration between the raw Brisbane and Sydney levels and the residuals are non-stationary, which means a single long-run equilibrium is not supported.
+## Data Source and Limitaions (WIP)
 
-We therefore model a factor model and treat the current δBS as an informative second factor (a proxy for PC2), rather than assuming a tight long-run equilibrium between Brisbane and Sydney levels.
+# Exploratory Analysis 
 
-## Sydney-Brisbane Spread vs National Trend
+The exploratory analysis utilises visualisations to characterise the dynamics of the national trend (U) and the Perth–Sydney spread (δPS), thereby clarifying their underlying properties.
 
-To justify including δBS alongside the national trend U in the factor model, we need to show that δBS is more bounded over time, meaning it stays within a narrower range and has lower long-term volatility.
-
-We approach this assumption from 3 angles:
-
-* Method One uses past volatility and spread measures to compare past fluctuations in δBS and U. It is straightforward, does not rely on a model, and gives a clear historical picture.
-
-* Method Two fits ARIMA models to both series and compares the width of 10-year forecast intervals. This gives a forward-looking view using well-known time series methods.
-
-* Method Three runs simulation-based forecasts to estimate the possible future range of each series. This can capture uncertainty beyond ARIMA’s limits and show patterns like non-linear or extreme swings.
-
-Combined, these methods integrate descriptive analysis, statistical modelling, and stochastic simulation to rigorously assess whether δBS is more bounded than U.
-
-### Statistical Comparison 
-
-In the first part, we compared δBS and U using overall statistics and rolling-window measures.
-
-* The global summary (entire time period) of δBS and U covered several different measures, each of them captures different aspect of spread. The statistics includes: 
-  * Standard deviation: The average distance of each observation to the series mean. If δBS has a smaller standard deviation than U, it indicates that δBS is more stable and less volatile over the entire period.
-  * Interquartile range: The spread of the medium 50% of the data, if δBS has a tighter interquartile range than U, then it is generally more stable. 
-  * Median absolute deviation: The median of absolute deviations from the mean. This measure is more robust to outliers. If the value of δBS is lower than U, it indicates that δBS has less extreme fluctuations.
-  * Total range: The difference between the maximum and minimum values in the series, which examines the extreme swings in the series.  
-
-We next applied rolling windows of 12 and 24 months to the same statistics. Rather than using the entire time span at once, this approach slides a fixed-length window along the series, calculating the variability measures at each step using only the most recent 12 or 24 months of data. This method highlights how the volatility and dispersion of δBS and U evolve over time. 
-
-We use 12-month windows to smooth short-term fluctuations and capture typical annual housing cycles, helping assess if volatility is bounded within a year. The 24-month windows extend the view, showing whether this boundedness holds beyond yearly patterns and reflecting medium-term events.
-
-To keep the report concise, we highlight two plots: the 12-month rolling standard deviation for short-term volatility and the 24-month rolling range for longer-term fluctuations.
-
-Finally, we calculated the proportion of time (by 12 and 24 months respectively) in which δBS had a lower spread than U, giving a simple measure of how often it was more bounded.
-
-```{r}
-# Load df 
-factor_trends_ana <- factor_trends |>
-  select(month_date, U = market, BS = mining) 
-
-# Global comparison - full period 
-global_summary <- factor_trends_ana |>
-  summarise(
-    sd_U = sd(U),
-    sd_BS = sd(BS),
-    var_U = var(U),
-    var_BS = var(BS),
-    iqr_U = IQR(U),
-    iqr_BS = IQR(BS),
-    range_U = diff(range(U)),
-    range_BS = diff(range(BS)),
-    mad_U = mad(U, center = median(U)),
-    mad_BS = mad(BS, center = median(BS))
-  ) 
-
-global_ratio <- global_summary |>
-  mutate(
-    sd_ratio_BS_over_U = sd_BS / sd_U,
-    iqr_ratio_BS_over_U = iqr_BS / iqr_U,
-    mad_ratio_BS_over_U = mad_BS / mad_U,
-    rng_ratio_BS_over_U = range_BS / range_U
+```{r autoplot}
+factor_trend_ts <- factor_trends |>
+  transmute(
+    month_date = yearmonth(as.Date(month_date)),
+    U = as.numeric(market),
+    PS = as.numeric(mining_ps)
   ) |>
-  select(sd_ratio_BS_over_U,
-         iqr_ratio_BS_over_U,
-         mad_ratio_BS_over_U,
-         rng_ratio_BS_over_U) 
+  as_tsibble(index = month_date)
 
-kable(global_ratio, caption = "Global Summary Statistics") 
+# Time-series autoplot
+p1 <- factor_trend_ts |> autoplot(U) + labs(title = "U: National Trend", x = "Month", y = "Index")
+p2 <- factor_trend_ts |> autoplot(PS) + labs(title = "δPS: Perth–Sydney Spread", x = "Month", y = "Index")
 
-# Summary tables 
-#print(global_summary) 
-#print(global_ratio)
+p1 + p2 
 ```
 
-The global ratios are all well below 1, meaning δBS has consistently lower spread than U across all four measures. This supports δBS being more bounded overall.
+**Time-series plots:** 
 
-```{r}
-# Rolling window config (12 and 24 months) 
-w12 <- 12
-w24 <- 24
+* U rises steadily from 2003 to 2012, transitions into a slower growth phase until 2019, then undergoes a sharp regime shift during 2020–2022 (the COVID period) followed by persistently elevated and volatile levels, with growth rates remaining time-varying throughout.
 
-# Functions for rolling statistics (SD, IQR, Range)
-roll_sd   <- function(x, k)
-  slide_dbl(x, sd, .before = k - 1, .complete = TRUE)
+* δPS displays a prolonged, uneven rise from 2003 to 2012, followed by a sharp regime shift, then COVID-related fluctuations, with the level adjusting and showing time-varying patterns.
 
-roll_iqr  <- function(x, k)
-  slide_dbl(x, IQR, .before = k - 1, .complete = TRUE)
-
-roll_rng  <- function(x, k)
-  slide_dbl(x, function(vec)
-    diff(range(vec)), .before = k - 1, .complete = TRUE)
-
-# Compute rolling statistics
-roll_stats <- factor_trends_ana |>
-  mutate(
-    # 12-month window
-    sd12_U = roll_sd(U, w12),
-    iqr12_U = roll_iqr(U, w12),
-    rng12_U = roll_rng(U, w12),
-    sd12_BS = roll_sd(BS, w12),
-    iqr12_BS = roll_iqr(BS, w12),
-    rng12_BS = roll_rng(BS, w12),
-    # 24-month window
-    sd24_U = roll_sd(U, w24),
-    iqr24_U = roll_iqr(U, w24),
-    rng24_U = roll_rng(U, w24),
-    sd24_BS = roll_sd(BS, w24),
-    iqr24_BS = roll_iqr(BS, w24),
-    rng24_BS = roll_rng(BS, w24)
-  )
+```{r season-plot}
+# Seasonal plots
+p3  <- factor_trend_ts |> gg_season(U) + labs(title = "Seasonal Plot: U", x = "Month", y = "Index")
+p4 <- factor_trend_ts |> gg_season(PS) + labs(title = "Seasonal Plot: δPS", x = "Month", y = "Index")
+p3 + p4
 ```
 
-```{r}
-# Rolling 12-month SD plot 
-sd12_long <- roll_stats |>
-  select(month_date, sd12_U, sd12_BS) |>
-  pivot_longer(-month_date, names_to = "series", values_to = "sd12") 
+**Seasonal plots:**
 
-ggplot(sd12_long, aes(month_date, sd12, color = series)) +
-  geom_line() +
-  labs(
-    title = "Rolling 12-month Standard Deviation (SD)",
-    subtitle = "Lower values show less volatility over a 12-month period",
-    x = "Year",
-    y = "SD"
-  ) +
-  theme_minimal()
+* U has apparent within-year slopes being dominated by the strong upward trend; no systematic month-of-year effects.
 
-# Rolling 24-month Range plot 
-rng24_long <- roll_stats |>
-  select(month_date, rng24_U, rng24_BS) |>
-  pivot_longer(-month_date, names_to = "series", values_to = "rng24") 
+* δPS shows little evidence of month-to-month seasonality, with no particular month standing out, though its overall level varies between years.
 
-ggplot(rng24_long, aes(month_date, rng24, color = series)) +
-  geom_line() +
-  labs(
-    title = "Rolling 24-month Range",
-    subtitle = "Wider range means bigger swings over the period",
-    x = "Year", y = "Range"
-  ) +
-  theme_minimal()
-
-# Summary table 
-porp_summary <- tibble(
-  period = c("12-month", "24-month"),
-  prop_lower_sd = c(
-    mean(roll_stats$sd12_BS < roll_stats$sd12_U, na.rm = TRUE),
-    mean(roll_stats$sd24_BS < roll_stats$sd24_U, na.rm = TRUE)
-  ),
-  prop_lower_iqr = c(
-    mean(roll_stats$iqr12_BS < roll_stats$iqr12_U, na.rm = TRUE),
-    mean(roll_stats$iqr24_BS < roll_stats$iqr24_U, na.rm = TRUE)
-  ),
-  prop_lower_rng = c(
-    mean(roll_stats$rng12_BS < roll_stats$rng12_U, na.rm = TRUE),
-    mean(roll_stats$rng24_BS < roll_stats$rng24_U, na.rm = TRUE)
-  )
-)
-
-kable(porp_summary, digits = 3, caption = "Proportion of Time δBS < U in Rolling Windows")
+```{r subseries-plot}
+# Seasonal subseries
+p5 <- factor_trend_ts |> gg_subseries(U) + labs(title = "Seasonal Subseries: U", x = "Month", y = "Index")
+p6 <- factor_trend_ts |> gg_subseries(PS) + labs(title = "Seasonal Subseries: δPS", x = "Month", y = "Index")
+p5 + p6
 ```
 
-While the rolling-window plots and statistics give a more detailed picture: 
+**Seasonal sub-series plot:** 
 
-* The 12-month rolling standard deviation plot shows that δBS is often less volatile than U, but not consistently (occasional spikes narrow the gap).
+* Each monthly panel of U shows a steady upward rise with mean value across months remaining similar, reinforcing that the series is driven more by trend than by seasonality.
 
-* The 24-month rolling range plot shows δBS has wider swings at times, but also periods where it is more stable than U, highlighting its tendency to avoid large swings over longer periods.
+* The δPS seasonal sub-series plot reinforces the lack of a dominant seasonal pattern, as the monthly profiles are similar in shape and the corresponding means remain relatively flat and close to zero.
 
-* δBS has a lower spread than U in around 38.6% of the time for 12-month windows and 41.0% for 24-month windows, indicating it is more bounded (however less than half the time) in rolling windows.
 
-### ARIMA Forecasting Comparison
+# Forecasting with the Factor Model 
 
-Following the descriptive analysis, in this section, we take a model-based approach to assess boundedness. 
+With the factors now established, we proceed to fit time series forecasting models to each series individually. As a first step, we examine the series in more detail. STL decomposition plots allow us to closely inspect the trend, seasonality, and remainder components, which helps determine the most suitable forecasting models for the series’ characteristics.
 
-We applied auto ARIMA to both δBS and U time series to produce 10-year ahead forecasts, with the sole purpose of comparing their long-term prediction interval widths. 
+Stationary tests (ADF and KPSS) indicate that both the national index (U) and the Perth–Sydney spread (PS) are non-stationary, so differencing is required. However, based on economic intuition that the PS series may be mean-reverting, we applied the Zivot–Andrews (ur.za) test. This confirmed that PS is in fact stationary, but with a single structural break occurring in October 2002.
 
-Using auto selection ensures each series is modelled appropriately without over-focusing on manual parameter tuning, keeping the emphasis on interval comparison as a measure of future boundedness.
+The dataset was partitioned into training and testing subsets, with one year of observations allocated to the testing set. Given that the data are recorded at a monthly frequency and span only 25 years, this allocation represents an optimal balance between ensuring sufficient data for model training while preserving an adequate sample for evaluation.
 
-```{r}
+```{r trans-ts}
 # Transform df to tsibble 
 factor_trends_ts <- factor_trends |>
   transmute(date = yearmonth(month_date),
             U  = market,
-            BS = mining) |> 
-  as_tsibble(index = date)
+            PS = mining) |> 
+  as_tsibble(index = date) 
+```
 
+```{r stationary-test, eval = FALSE}
 # U is non stationary, I(1)
 adf_U <- ur.df(factor_trends_ts$U, type="trend", lags=12)
 kpss_U <- kpss.test(factor_trends_ts$U, null="Trend")
-# BS also I(1)
-adf_BS <- ur.df(factor_trends_ts$BS, type="drift", lags=12) 
-kpss_BS <- kpss.test(factor_trends_ts$BS, null="Level")
-# BS is stationary with a single structural break at position 53: "2002 Oct"
-za <- ur.za(factor_trends_ts$BS, model = "both") 
+# PS also I(1)
+adf_PS <- ur.df(factor_trends_ts$PS, type="drift", lags=12) 
+kpss_PS <- kpss.test(factor_trends_ts$PS, null="Level")
+# PS is stationary with a single structural break at position 53: "2002 Oct"
+za <- ur.za(factor_trends_ts$PS, model = "both") 
 ```
 
-U: big, smooth upward trend; seasonality is tiny (order 0.003–0.004 vs level ~1.5+); remainder has multi-year waves. 
-BS: oscillates around ~0; no permanent trend; seasonality tiny; long multi-year swings; we also found a structural break (ZA test).
-```{r}
-# STL decompo plots 
+## National Trend 
+
+The STL decomposition of the national trend U reveals a smooth and persistent upward trajectory in the trend component, while the seasonal component is of relatively minor magnitude, however the annual seasonality is strong and repeating. To stabilise variation in the seasonal component, a Box–Cox transformation was applied using the Guerrero method, which produced a λ value of 0.9. Given its proximity to one, the transformation had a negligible effect on the modelling outcome. The remainder component displays mostly small noise, with some bigger shocks.
+
+The modelling strategy was guided by exploratory data analysis and the STL decomposition, which suggested a random walk with drift, `ARIMA(U ∼ pdq(0,1,0))`, as an appropriate baseline specification. 
+
+To refine the model, we subsequently evaluated neighbouring specifications with alternative autoregressive and moving average terms, using AICc values and residual diagnostics as selection criteria. 
+
+In the modelling process, we evaluated a range of specifications informed both by diagnostic checks and prior knowledge. Residual analysis suggested the presence of semi-annual dynamics, which motivated the inclusion of Fourier terms with `K = 2`. We also investigated seasonal extensions with `P = 1`, alongside piecewise specifications with knots aligned to major economic events: the Global Financial Crisis (2008), the end of the mining investment boom (2012), and the onset of the COVID-19 pandemic (2020). These variations were assessed with respect to residual behaviour, statistical significance, and their ability to capture shocks apparent in the remainder component.
+
+Among the fitted models, two candidates emerged as particularly strong. The first, an ARIMA(2,1,1) with Fourier terms (K = 2) and drift, achieved a Ljung–Box p-value above 5%, indicating residuals consistent with white noise. A second competitive specification combined Fourier terms (K = 2) with intervention dummies (step and pulse) and an ARIMA(2,1,1) structure. While both models satisfied the residual whiteness criterion, their information criteria diverged: the AICc values differed by approximately 20 to 40 points in favour of the intervention model. This highlights a central trade-off in model selection: balancing residual diagnostics against information criteria, and ultimately emphasising forecast performance as the guiding criterion for choosing between these specifications.
+
+```{r fitting-u}
+# Identify fits 
 U_stl <- factor_trends_ts |> 
   model(stl = STL(U))
 
@@ -388,95 +361,96 @@ U_stl |>
 
 ggtsdisplay(factor_trends_ts$U, main = "ACF and PACF with National Trend U")
 
-BS_stl <- factor_trends_ts |> 
-  model(stl = STL(BS))
-
-BS_stl |> 
-  components() |> 
-  autoplot() +
-  labs(title = "STL Decomposition of Mining Trend BS")
-
-ggtsdisplay(factor_trends_ts$BS, main = "ACF and PACF with Mining Trend BS")
-```
-
-```{r}
 # Split testing and training 
 train_U <- factor_trends_ts |> 
-  select(date, U) |>
+  select(U, date) |> 
   filter(date < yearmonth("2023 Jan")) 
 
 test_U <- factor_trends_ts |> 
-  select(date, U) |>
+  select(U, date) |> 
   filter(date >= yearmonth("2023 Jan")) 
-
-train_BS <- factor_trends_ts |> 
-  select(date, BS) |>
-  filter(date < yearmonth("2023 Jan"))
-
-test_BS <- factor_trends_ts |> 
-  select(date, BS) |>
-  filter(date >= yearmonth("2023 Jan"))
 ```
 
-
 ```{r}
-# Add knots 
-add_pw <- function(df){
-  df %>%
+# Function to add knots - improvement can be done by examining the mining expenditure data 
+add_pw <- function(df) {
+  df |> 
     mutate(
-      D_2008 = as.integer(date >= yearmonth("2008-01")), # GFC/credit conditions shift
-      D_2012 = as.integer(date >= yearmonth("2012-01")), # end of the mining-investment boom / regime change
-      R_2020 = pmax(0, (year(date) - 2020) * 12 + (month(date) - 3)) #covid 
+      # steps
+      D_2008 = as.integer(date >= yearmonth("2008 Jan")),
+      D_2012 = as.integer(date >= yearmonth("2012 Jan")),
+      R_2020 = pmax(0L, as.integer(yearmonth(date) - yearmonth("2020 Mar"))),
+      step_2020_03  = as.integer(date >= yearmonth("2020 Mar")),
+      pulse_2020_04 = as.integer(date ==  yearmonth("2020 Apr"))
     )
 }
-train_U <- add_pw(train_U)
-test_U  <- add_pw(test_U)
 
-# Fitting U - ETS need to transform the data 
-fit_U <- train_U %>%
+train_U <- add_pw(train_U)
+
+# Fit models 
+fit_U <- train_U |> 
   model(
-    rw_drift  = ARIMA(U ~ 1 + pdq(0,1,0)),                 # RW + drift - benchmark 
-  #  arima011  = ARIMA(U ~ 1 + pdq(0,1,1)),                 # (0,1,1) with drift
-    arima211  = ARIMA(U ~ 1 + pdq(2,1,1) + fourier(K = 2)),                # (2,1,1) with drift + 6-month harmonic
-  #  ets_damp  = ETS(  U ~ error("A") + trend("Ad") + season("N")),  # ETS damped trend
-  #  piecewise = ARIMA(U ~ 1 + pdq(0,1,0) + D_2008 + D_2012 + R_2020) # piecewise
-  #  ets_auto = ETS(U)
+    autoarima = ARIMA(U),
+    rw_drift  = ARIMA(U ~ 1 + pdq(0,1,0)),
+    arima211  = ARIMA(U ~ 1 + fourier(K = 2) + pdq(2,1,1)),
+    arima110  = ARIMA(U ~ 1 + fourier(K = 2) + pdq(1,1,0)),
+    arima111  = ARIMA(U ~ 1 + fourier(K = 2) + pdq(1,1,1)),
+    sarima211 = ARIMA(U ~ 1 + pdq(2,1,1) + PDQ(1,0,0)),
+    piece = ARIMA(U ~ 1 + pdq(1,1,1) + D_2008 + D_2012 + R_2020),
+    step = ARIMA(U ~ fourier(K = 2) + step_2020_03 + pulse_2020_04 + pdq(2,1,1))
   )
 
 # Examine fit  
 glance(fit_U) |> arrange(AICc)
 
 fit_U |> 
+  select(step) |>
+  gg_tsresiduals()
+
+fit_U |> 
   select(arima211) |>
   gg_tsresiduals()
 
 # Ljung-Box test
-lb_U <- bind_rows(
-  augment(fit_U |> select(rw_drift))  |> features(.innov, ljung_box, lag=12, dof=0) |> mutate(.model="rw_drift"),
- # augment(fit_U |> select(arima011)) |> features(.innov, ljung_box, lag=12, dof=1) |> mutate(.model="arima011"),
-  augment(fit_U |> select(arima211)) |> features(.innov, ljung_box, lag=12, dof=1) |> mutate(.model="arima111"),
- # augment(fit_U |> select(piecewise))|> features(.innov, ljung_box, lag=12, dof=0) |> mutate(.model="piecewise"),
-  #augment(fit_U |> select(ets_damp)) |> features(.innov, ljung_box, lag=12, dof=0) |> mutate(.model="ets_damp")
-) |> print()
+lb_tbl <- fit_U |>
+  augment() |> 
+  features(.innov, ljung_box, lag = 12) |>
+  select(.model, lb_stat, lb_pvalue) |> 
+  arrange(desc(lb_pvalue)) |> 
+  print()
 
-fc_U <- fit_U |> 
-  select(arima211, rw_drift) |> 
-  forecast(test_U, level = c(80,95))
-
-autoplot(fc_U, test_U) + scale_fill_brewer(palette = "Blues") + labs(title = "Forecasts on Test Set for U")
 ```
 
-The auto ARIMA model selected ARIMA(0,2,0)(2,0,0)[12] for the national trend U and ARIMA(1,1,2) for the Brisbane–Sydney spread δBS. We have also examined the residuals of both fitted models, which appear to be white noise, indicating that the models adequately capture the underlying dynamics of both series.
 
-Since applying two levels of differencing implies a quadratic trend, it may indicate over-differencing for an economic series that exhibits drift. Our visual inspection already suggests the presence of drift, and an Augmented Dickey–Fuller test (run separately) further confirms this with a Phi statistic significant at the 5% level. To avoid clutter, we do not include the test output in this report.
+## Mining Trend 
+PS: oscillates around ~0; no permanent trend; seasonality tiny; long multi-year swings; we also found a structural break (ZA test).
+```{r}
+PS_stl <- factor_trends_ts |> 
+  model(stl = STL(PS))
 
-Given this, we manually fitted an ARIMA(0,1,0) model with a constant (random walk with drift) in parallel for U and compared its AICc value against the auto-selected ARIMA model. The auto ARIMA model is objectively better by AICc and diagnostics, so we will report the auto ARIMA for completeness but also include an ARIMA(1,0,1) with a constant as a benchmark for comparison since it has a stronger intuition. 
+PS_stl |> 
+  components() |> 
+  autoplot() +
+  labs(title = "STL Decomposition of Mining Trend PS")
+
+ggtsdisplay(factor_trends_ts$PS, main = "ACF and PACF with Mining Trend PS")
+
+train_PS <- factor_trends_ts |> 
+  select(date, PS) |>
+  filter(date < yearmonth("2023 Jan"))
+
+test_PS <- factor_trends_ts |> 
+  select(date, PS) |>
+  filter(date >= yearmonth("2023 Jan"))
+```
+
+## Forecast Performance 
 
 ```{r}
 # Forecast - 10 years
 h <- 120
 fc_U  <- fabletools::forecast(fit_U,  h = h, level = c(80, 95))
-# fc_BS <- fabletools::forecast(fit_BS, h = h, level = c(80, 95))
+# fc_PS <- fabletools::forecast(fit_PS, h = h, level = c(80, 95))
 
 # Fan width 
   fcbands_U <- fc_U |> 
@@ -513,185 +487,19 @@ autoplot(fc_U, factor_trends_ts) +
 
 # Plot the forecasts
 #autoplot(fc_U, factor_trends_ts)
-# autoplot(fc_BS, factor_trends_ts) 
+# autoplot(fc_PS, factor_trends_ts) 
 ```
 
 From the forecast fan plot, we can first see that the random walk with drift produces very narrow forecast intervals, because it assumes only linear variance growth with horizon and ignores short-run autocorrelation. By contrast, the auto-ARIMA specification captures AR and MA dynamics, which propagate uncertainty further into the future, resulting in wider intervals. 
 
-The two alternative models for the national trend U lead to very different conclusions when compared with δBS. The random walk with drift produces unrealistically narrow intervals, while the auto-ARIMA specification not only achieves a much lower AICc but also yields forecast intervals that better reflect the underlying uncertainty. For this reason, we continue with the auto-ARIMA model in our boundedness comparison.
+The two alternative models for the national trend U lead to very different conclusions when compared with δPS. The random walk with drift produces unrealistically narrow intervals, while the auto-ARIMA specification not only achieves a much lower AICc but also yields forecast intervals that better reflect the underlying uncertainty. For this reason, we continue with the auto-ARIMA model in our boundedness comparison.
 
-Based on the average 10-year forecast ranges, the δBS spread consistently shows narrower prediction intervals than the national trend U. This indicates that the spread is likely to remain more contained over the next decade, a conclusion supported by both the summary statistics and the forecast visualisations.
+Based on the average 10-year forecast ranges, the δPS spread consistently shows narrower prediction intervals than the national trend U. This indicates that the spread is likely to remain more contained over the next decade, a conclusion supported by both the summary statistics and the forecast visualisations.
 
-```{r eval = FALSE}
-set.seed(123)
 
-# Simulation 
-n <- 5000 
-sim_U  <- fit_U |> 
-  select(auto_U) |> 
-  generate(h = h, times = n, bootstrap = TRUE)
+## Factor Model Application on SA4 regions 
 
-sim_BS <- fit_BS %>%
-  generate(h = h, times = n, bootstrap = TRUE)
-```
-
-```{r eval = FALSE}
-bands_U <- sim_U %>%
-  as_tibble() %>%
-  group_by(date) %>%
-  summarise(
-    p50  = median(.sim, na.rm = TRUE),
-    lo80 = quantile(.sim, 0.10, na.rm = TRUE),
-    hi80 = quantile(.sim, 0.90, na.rm = TRUE),
-    lo95 = quantile(.sim, 0.025, na.rm = TRUE),
-    hi95 = quantile(.sim, 0.975, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(width80 = hi80 - lo80, width95 = hi95 - lo95) %>%
-  mutate(series = "U")
-
-bands_BS <- sim_BS %>%
-  as_tibble() %>%
-  group_by(date) %>%
-  summarise(
-    p50  = median(.sim, na.rm = TRUE),
-    lo80 = quantile(.sim, 0.10, na.rm = TRUE),
-    hi80 = quantile(.sim, 0.90, na.rm = TRUE),
-    lo95 = quantile(.sim, 0.025, na.rm = TRUE),
-    hi95 = quantile(.sim, 0.975, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  mutate(width80 = hi80 - lo80, width95 = hi95 - lo95) %>%
-  mutate(series = "δBS")
-
-# End of horizon fan widths
-end_widths <- bind_rows(bands_U, bands_BS) |> 
-  slice_max(order_by = date, n = 1, by = series) |> 
-  select(series, width80, width95)
-
-kable(end_widths, caption = "End of Horizon Fan Widths for δBS and U")
-```
-
-The fan width at the end of the forecast horizon indicates that the uncertainty of U is approximately nine times greater than that of δBS.
-
-```{r eval = FALSE}
-# Stay in historical 90% band prob 
-lo_U  <- quantile(factor_trends_ts$U,  0.05, na.rm = TRUE)
-hi_U  <- quantile(factor_trends_ts$U,  0.95, na.rm = TRUE)
-lo_BS <- quantile(factor_trends_ts$BS, 0.05, na.rm = TRUE)
-hi_BS <- quantile(factor_trends_ts$BS, 0.95, na.rm = TRUE)
-
-pr_U <- sim_U |>
-  as_tibble() |>
-  group_by(.rep) |>
-  summarise(
-    path_min = min(.sim, na.rm = TRUE),
-    path_max = max(.sim, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
-  summarise(stay_90 = mean(path_min >= lo_U & path_max <= hi_U)) %>%
-  pull(stay_90)
-
-pr_BS <- sim_BS |>
-  as_tibble() |>
-  group_by(.rep) |>
-  summarise(
-    path_min = min(.sim, na.rm = TRUE),
-    path_max = max(.sim, na.rm = TRUE),
-    .groups = "drop"
-  ) |>
-  summarise(stay_90 = mean(path_min >= lo_BS &
-                             path_max <= hi_BS)) %>%
-  pull(stay_90)
-
-stay_prob_tbl <- tibble(
-  series = c("U", "δBS"),
-  stay_90 = c(pr_U, pr_BS)
-)
-
-kable(stay_prob_tbl, caption = "Probability of Staying in Historical 90% Band")
-```
-
-δBS exhibits a 26.0% probability of remaining within its historical 90% confidence band, whereas U demonstrates a 0% probability. 
-
-```{r eval = FALSE}
-# MAD over horizon 
-last_U  <- factor_trends_ts |> slice_max(date, n = 1) |> pull(U)
-last_BS <- factor_trends_ts |> slice_max(date, n = 1) |> pull(BS)
-
-devs_U <- sim_U |>
-  group_by(.rep) |>
-  summarise(max_dev = max(abs(.sim - last_U), na.rm = TRUE), .groups = "drop")
-
-devs_BS <- sim_BS |>
-  group_by(.rep) |>
-  summarise(max_dev = max(abs(.sim - last_BS), na.rm = TRUE), .groups = "drop")
-
-md_U_median <- median(devs_U$max_dev, na.rm = TRUE)
-md_U_p90    <- quantile(devs_U$max_dev, 0.90, na.rm = TRUE)
-
-md_BS_median <- median(devs_BS$max_dev, na.rm = TRUE)
-md_BS_p90    <- quantile(devs_BS$max_dev, 0.90, na.rm = TRUE)
-
-max_dev_tbl <- tibble::tibble(
-  series         = c("U", "δBS"),
-  median_max_dev = c(md_U_median, md_BS_median),
-  p90_max_dev    = c(md_U_p90,    md_BS_p90)
-)
-
-kable(max_dev_tbl, caption = "Maximum Deviation Statistics for δBS and U")
-```
-
-Over the forecast horizon, the mean absolute deviation indicates that δBS exhibits both a lower median deviation and a lower 90th-percentile maximum deviation compared to U.
-
-## Evaluating δBS as a Proxy for PC2
-
-Following the earlier evaluation of cointegration and boundedness, we next assess whether the constructed δBS can serve as a valid proxy for PC2 in the factor model. This assessment is carried out by visually comparing the shape of the two standardised series and statistically testing their correlation.
-
-The two series display very similar shapes, with a high correlation (>96%). The scatterplot illustrates why they are not identical: the points form loops rather than a perfect diagonal, reflecting small lead–lag effects as housing cycles unfold. This arises because PC2 is a statistical construct from PCA, while δBS is a regression-based Sydney–Brisbane spread. Nevertheless, given the very high correlation, δBS can be considered a valid proxy for PC2 in the factor model, with the minor differences not being statistically significant.”
-
-```{r}
-# Extract variables BS and PC2 
-BS <- factor_trends |>
-  select(month_date, mining) |>
-  rename("period" = "month_date")
-
-Z2 <- pcs |> 
-  select(mode, pc_value, period) |> 
-  filter(mode == 1) |>
-  select(-mode)
-
-# Join and scale with mean 0 variance 1
-compare_BS_Z2 <- BS |>
-  inner_join(Z2, by = "period") |>
-  mutate(
-    mining_std = as.numeric(scale(mining, center = TRUE, scale = TRUE)), 
-    z2_std     = as.numeric(scale(pc_value, center = TRUE, scale = TRUE))
-  )
-
-# Plot the series 
-ggplot(compare_BS_Z2, aes(x = as.Date(period))) +
-  geom_line(aes(y = mining_std, colour = "δBS (Mining factor)")) +
-  geom_line(aes(y = z2_std, colour = "PC2 (z2)")) +
-  labs(x = "Period", y = "Index Value", colour = "Series") +
-  theme_minimal()
-
-# Calculate and plot the correlation  
-BS_Z2_corr <- cor(compare_BS_Z2$mining, compare_BS_Z2$pc_value, use = "complete.obs")
-cat("Correlation between δBS (mining) and PC2 (Z2):", BS_Z2_corr, "\n")
-
-ggplot(compare_BS_Z2, aes(x = pc_value, y = mining)) +
-  geom_point(alpha = 0.5) +
-  geom_smooth(method = "lm",
-              se = FALSE,
-              colour = "red") +
-  labs(title = "Correlation between δBS (Mining factor) and PC2", x = "PC2 (Z2)", y = "δBS (Mining)") +
-  theme_minimal()
-```
-
-## Baseline Factor Model Fit on SA4 regions
-
-### Identify under-performing regions
+### Identify under-performing regions - Baseline Factor Model Fit on SA4 regions
 
 We now turn to evaluating how well the factor model captures the variation in individual SA4 indexes.
 
@@ -773,7 +581,7 @@ keep88 <- reg_sa4 |>
 # Clean shapefile + keep only the 88 + join r2 
 sa4_r2 <- sa4 |>
   mutate(region_norm = norm(SA4_NAME21)) |>
-  # drop empty geometries and special ABS areas
+  # drop empty geometries and special APS areas
   filter(!st_is_empty(geometry)) |>
   filter(!str_detect(region_norm, "^MIGRATORY\\s+OFFSHORE\\s+SHIPPING"),
          !str_detect(region_norm, "^NO\\s+USUAL\\s+ADDRESS")) |>
@@ -829,4 +637,156 @@ panel <- sa4_indexes_long |>
   )
 ```
 
-# Forecast with Factor Model 
+# Improve Model by Time-dependent Coefficients 
+
+
+# Boundedness Test on the Factor Trends (WIP)
+
+(WIP - examine numbers since we switched to PS; Add more methodologies with the forecast model should be built at this stage)
+
+To justify including δPS alongside the national trend U in the factor model, we need to show that δPS is more bounded over time, meaning it stays within a narrower range and has lower long-term volatility by comparing δPS and U using overall statistics and rolling-window measures.
+
+* The global summary (entire time period) of δPS and U covered several different measures, each of them captures different aspect of spread. The statistics includes: 
+  * Standard deviation: The average distance of each observation to the series mean. If δPS has a smaller standard deviation than U, it indicates that δPS is more stable and less volatile over the entire period.
+  * Interquartile range: The spread of the medium 50% of the data, if δPS has a tighter interquartile range than U, then it is generally more stable. 
+  * Median aPSolute deviation: The median of abolute deviations from the mean. This measure is more robust to outliers. If the value of δPS is lower than U, it indicates that δPS has less extreme fluctuations.
+  * Total range: The difference between the maximum and minimum values in the series, which examines the extreme swings in the series.  
+
+We next applied rolling windows of 12 and 24 months to the same statistics. Rather than using the entire time span at once, this approach slides a fixed-length window along the series, calculating the variability measures at each step using only the most recent 12 or 24 months of data. This method highlights how the volatility and dispersion of δPS and U evolve over time. 
+
+We use 12-month windows to smooth short-term fluctuations and capture typical annual housing cycles, helping assess if volatility is bounded within a year. The 24-month windows extend the view, showing whether this boundedness holds beyond yearly patterns and reflecting medium-term events.
+
+To keep the report concise, we highlight two plots: the 12-month rolling standard deviation for short-term volatility and the 24-month rolling range for longer-term fluctuations.
+
+Finally, we calculated the proportion of time (by 12 and 24 months respectively) in which δPS had a lower spread than U, giving a simple measure of how often it was more bounded.
+
+```{r}
+# Load df 
+factor_trends_ana <- factor_trends |>
+  select(month_date, U = market, PS = mining) 
+
+# Global comparison - full period 
+global_summary <- factor_trends_ana |>
+  summarise(
+    sd_U = sd(U),
+    sd_PS = sd(PS),
+    var_U = var(U),
+    var_PS = var(PS),
+    iqr_U = IQR(U),
+    iqr_PS = IQR(PS),
+    range_U = diff(range(U)),
+    range_PS = diff(range(PS)),
+    mad_U = mad(U, center = median(U)),
+    mad_PS = mad(PS, center = median(PS))
+  ) 
+
+global_ratio <- global_summary |>
+  mutate(
+    sd_ratio_PS_over_U = sd_PS / sd_U,
+    iqr_ratio_PS_over_U = iqr_PS / iqr_U,
+    mad_ratio_PS_over_U = mad_PS / mad_U,
+    rng_ratio_PS_over_U = range_PS / range_U
+  ) |>
+  select(sd_ratio_PS_over_U,
+         iqr_ratio_PS_over_U,
+         mad_ratio_PS_over_U,
+         rng_ratio_PS_over_U) 
+
+kable(global_ratio, caption = "Global Summary Statistics") 
+```
+
+The global ratios are all well below 1, meaning δPS has consistently lower spread than U across all four measures. This supports δPS being more bounded overall.
+
+```{r}
+# Rolling window config (12 and 24 months) 
+w12 <- 12
+w24 <- 24
+
+# Functions for rolling statistics (SD, IQR, Range)
+roll_sd   <- function(x, k)
+  slide_dbl(x, sd, .before = k - 1, .complete = TRUE)
+
+roll_iqr  <- function(x, k)
+  slide_dbl(x, IQR, .before = k - 1, .complete = TRUE)
+
+roll_rng  <- function(x, k)
+  slide_dbl(x, function(vec)
+    diff(range(vec)), .before = k - 1, .complete = TRUE)
+
+# Compute rolling statistics
+roll_stats <- factor_trends_ana |>
+  mutate(
+    # 12-month window
+    sd12_U = roll_sd(U, w12),
+    iqr12_U = roll_iqr(U, w12),
+    rng12_U = roll_rng(U, w12),
+    sd12_PS = roll_sd(PS, w12),
+    iqr12_PS = roll_iqr(PS, w12),
+    rng12_PS = roll_rng(PS, w12),
+    # 24-month window
+    sd24_U = roll_sd(U, w24),
+    iqr24_U = roll_iqr(U, w24),
+    rng24_U = roll_rng(U, w24),
+    sd24_PS = roll_sd(PS, w24),
+    iqr24_PS = roll_iqr(PS, w24),
+    rng24_PS = roll_rng(PS, w24)
+  )
+```
+
+```{r}
+# Rolling 12-month SD plot 
+sd12_long <- roll_stats |>
+  select(month_date, sd12_U, sd12_PS) |>
+  pivot_longer(-month_date, names_to = "series", values_to = "sd12") 
+
+ggplot(sd12_long, aes(month_date, sd12, color = series)) +
+  geom_line() +
+  labs(
+    title = "Rolling 12-month Standard Deviation (SD)",
+    subtitle = "Lower values show less volatility over a 12-month period",
+    x = "Year",
+    y = "SD"
+  ) +
+  theme_minimal()
+
+# Rolling 24-month Range plot 
+rng24_long <- roll_stats |>
+  select(month_date, rng24_U, rng24_PS) |>
+  pivot_longer(-month_date, names_to = "series", values_to = "rng24") 
+
+ggplot(rng24_long, aes(month_date, rng24, color = series)) +
+  geom_line() +
+  labs(
+    title = "Rolling 24-month Range",
+    subtitle = "Wider range means bigger swings over the period",
+    x = "Year", y = "Range"
+  ) +
+  theme_minimal()
+
+# Summary table 
+porp_summary <- tibble(
+  period = c("12-month", "24-month"),
+  prop_lower_sd = c(
+    mean(roll_stats$sd12_PS < roll_stats$sd12_U, na.rm = TRUE),
+    mean(roll_stats$sd24_PS < roll_stats$sd24_U, na.rm = TRUE)
+  ),
+  prop_lower_iqr = c(
+    mean(roll_stats$iqr12_PS < roll_stats$iqr12_U, na.rm = TRUE),
+    mean(roll_stats$iqr24_PS < roll_stats$iqr24_U, na.rm = TRUE)
+  ),
+  prop_lower_rng = c(
+    mean(roll_stats$rng12_PS < roll_stats$rng12_U, na.rm = TRUE),
+    mean(roll_stats$rng24_PS < roll_stats$rng24_U, na.rm = TRUE)
+  )
+)
+
+kable(porp_summary, digits = 3, caption = "Proportion of Time δPS < U in Rolling Windows")
+```
+
+While the rolling-window plots and statistics give a more detailed picture: 
+
+* The 12-month rolling standard deviation plot shows that δPS is often less volatile than U, but not consistently (occasional spikes narrow the gap).
+
+* The 24-month rolling range plot shows δPS has wider swings at times, but also periods where it is more stable than U, highlighting its tendency to avoid large swings over longer periods.
+
+* δPS has a lower spread than U in around 38.6% of the time for 12-month windows and 41.0% for 24-month windows, indicating it is more bounded (however less than half the time) in rolling windows.
