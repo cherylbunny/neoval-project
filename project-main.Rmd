@@ -48,7 +48,7 @@ sa4_indexes <- read_csv("data/indexes_city_and_sa4.csv")
 factor_trends <- read_csv("data/df_factor_trends.csv")
 
 # Static regression coef 
-reg_coefs <- read_csv("data/df_reg_coefs.csv")
+reg_coefs <- read_csv("data/df_reg_coefs.csv") 
 
 # PC score and loadings 
 pcs <- read_csv("data/df_pcs.csv")
@@ -63,9 +63,12 @@ eofs <- read_csv("data/df_eofs.csv")
 # For plotting SA4 geo 
 sa4 <- st_read("data/SA4_2021_AUST_SHP_GDA2020/SA4_2021_AUST_GDA2020.shp", quiet = TRUE)
 
-# Cleaning city names 
+# Cleaning names 
 city_indexes <- city_indexes |> 
   clean_names() 
+
+reg_coefs <- reg_coefs |>
+  filter(!(region == "AUSTRALIAN CAPITAL TERRITORY" & duplicated(region)))
 ```
 
 ```{r compute-mining-ps}
@@ -164,13 +167,12 @@ The PCA results show that the first three principal components capture much of t
 
 Our exploratory research extends the PCA approach by addressing these limitations through a factor linear model, which uses time series data directly, with independent variables serving as proxies for the PCA-derived principal components.
 
-# Moving from PCA to Factor Model (WIP)
+# Moving from PCA to Factor Model 
 
 The national trend (U) exhibits a close correspondence with PC1 (market), while the Perth–Sydney spread (δPS) aligns with PC2 (mining). Given that these principal components account for the majority of variance in the index, our preliminary analysis focuses on U and δPS, with subsequent extensions planned. (WIP - might add lifestyle)
 
 -   Explain on more of why did we move on from PCA to factor model
 -   Explain how did we find the factors (like how did we take national as PC1, PS as PC2...)
--   Might move add cointegration test to this section if needed as it explains how we formulate the alpha 
 
 We examined whether PC2 is better represented by the Brisbane–Sydney or Perth–Sydney spread by comparing the shapes of the standardised series and testing their correlations with PC2. The Perth–Sydney spread aligns more closely with PC2: The scatterplot shows a distribution that falls more evenly along the regression line, and its correlation with PC2 is slightly higher (98% versus 96% for the Brisbane–Sydney spread). While the difference is minor and not statistically significant, the Perth–Sydney spread is the stronger candidate as a proxy for PC2.
 
@@ -224,8 +226,8 @@ plot_scatter <- ggplot(scatter_df, aes(x = pc_value, y = spread_value)) +
   labs(title = "PC2 vs spreads", x = "PC2", y = "Spread value") +
   theme_minimal()
 
-plot_ts
 plot_scatter 
+plot_ts
 ```
 
 ```{r cointegration-test, eval = FALSE}
@@ -313,7 +315,7 @@ p5 + p6
 
 With the factors now established, we proceed to fit time series forecasting models to each series individually. As a first step, we examine the series in more detail. STL decomposition plots allow us to closely inspect the trend, seasonality, and remainder components, which helps determine the most suitable forecasting models for the series’ characteristics.
 
-Stationary tests (ADF and KPSS) indicate that both the national index (U) and the Perth–Sydney spread (PS) are non-stationary, so differencing is required. However, based on economic intuition that the PS series may be mean-reverting, we applied the Zivot–Andrews (ur.za) test. This confirmed that PS is in fact stationary, but with a single structural break occurring in October 2002.
+Stationary tests (ADF and KPSS) indicate that both the national index (U) and the Perth–Sydney spread (PS) are non-stationary, so differencing is required. However, based on economic intuition that the PS series may be mean-reverting, we applied the Zivot–Andrews (ur.za) test. This confirmed that PS could be stationary with several structural break.
 
 The dataset was partitioned into training and testing subsets, with one year of observations allocated to the testing set. Given that the data are recorded at a monthly frequency and span only 25 years, this allocation represents an optimal balance between ensuring sufficient data for model training while preserving an adequate sample for evaluation.
 
@@ -333,7 +335,7 @@ kpss_U <- kpss.test(factor_trends_ts$U, null="Trend")
 # PS also I(1)
 adf_PS <- ur.df(factor_trends_ts$PS, type="drift", lags=12) 
 kpss_PS <- kpss.test(factor_trends_ts$PS, null="Level")
-# PS is stationary with a single structural break at position 53: "2002 Oct"
+# PS is stationary with a single structural break at position 53: 2011 Apr
 za <- ur.za(factor_trends_ts$PS, model = "both") 
 ```
 
@@ -341,15 +343,7 @@ za <- ur.za(factor_trends_ts$PS, model = "both")
 
 The STL decomposition of the national trend U reveals a smooth and persistent upward trajectory in the trend component, while the seasonal component is of relatively minor magnitude, however the annual seasonality is strong and repeating. To stabilise variation in the seasonal component, a Box–Cox transformation was applied using the Guerrero method, which produced a λ value of 0.9. Given its proximity to one, the transformation had a negligible effect on the modelling outcome. The remainder component displays mostly small noise, with some bigger shocks.
 
-The modelling strategy was guided by exploratory data analysis and the STL decomposition, which suggested a random walk with drift, `ARIMA(U ∼ pdq(0,1,0))`, as an appropriate baseline specification. 
-
-To refine the model, we subsequently evaluated neighbouring specifications with alternative autoregressive and moving average terms, using AICc values and residual diagnostics as selection criteria. 
-
-In the modelling process, we evaluated a range of specifications informed both by diagnostic checks and prior knowledge. Residual analysis suggested the presence of semi-annual dynamics, which motivated the inclusion of Fourier terms with `K = 2`. We also investigated seasonal extensions with `P = 1`, alongside piecewise specifications with knots aligned to major economic events: the Global Financial Crisis (2008), the end of the mining investment boom (2012), and the onset of the COVID-19 pandemic (2020). These variations were assessed with respect to residual behaviour, statistical significance, and their ability to capture shocks apparent in the remainder component.
-
-Among the fitted models, two candidates emerged as particularly strong. The first, an ARIMA(2,1,1) with Fourier terms (K = 2) and drift, achieved a Ljung–Box p-value above 5%, indicating residuals consistent with white noise. A second competitive specification combined Fourier terms (K = 2) with intervention dummies (step and pulse) and an ARIMA(2,1,1) structure. While both models satisfied the residual whiteness criterion, their information criteria diverged: the AICc values differed by approximately 20 to 40 points in favour of the intervention model. This highlights a central trade-off in model selection: balancing residual diagnostics against information criteria, and ultimately emphasising forecast performance as the guiding criterion for choosing between these specifications.
-
-```{r fitting-u}
+```{r fitting-u-plot}
 # Identify fits 
 U_stl <- factor_trends_ts |> 
   model(stl = STL(U))
@@ -371,21 +365,33 @@ test_U <- factor_trends_ts |>
   filter(date >= yearmonth("2023 Jan")) 
 ```
 
-```{r}
+The modelling strategy was guided by exploratory data analysis and the STL decomposition, which suggested a random walk with drift, `ARIMA(U ∼ pdq(0,1,0))`, as an appropriate baseline specification. 
+
+To refine the model, we subsequently evaluated neighbouring specifications with alternative autoregressive and moving average terms, using AICc values and residual diagnostics as selection criteria. 
+
+In the modelling process, we evaluated a range of specifications informed both by diagnostic checks and prior knowledge. Inspection of the residuals suggested some semi-annual variation, and Fourier terms with `K = 2` were added to account for potential higher-frequency seasonality. We also investigated seasonal extensions with `P = 1`, alongside piecewise specifications with knots aligned to major economic events: the Global Financial Crisis (2008), the end of the mining investment boom (2012), and the onset of the COVID-19 pandemic (2020). These variations were assessed with respect to residual behaviour, statistical significance, and their ability to capture shocks apparent in the remainder component.
+
+Among the fitted models, two candidates emerged as particularly strong. The first, an ARIMA(2,1,1) with Fourier terms (K = 2) and drift. A second competitive specification combined Fourier terms (K = 2) with intervention dummies (step and pulse) and an ARIMA(2,1,1) structure. 
+
+```{r fitting-u-model}
 # Function to add knots - improvement can be done by examining the mining expenditure data 
 add_pw <- function(df) {
   df |> 
     mutate(
+      ym = yearmonth(date),
       # steps
       D_2008 = as.integer(date >= yearmonth("2008 Jan")),
       D_2012 = as.integer(date >= yearmonth("2012 Jan")),
       R_2020 = pmax(0L, as.integer(yearmonth(date) - yearmonth("2020 Mar"))),
       step_2020_03  = as.integer(date >= yearmonth("2020 Mar")),
-      pulse_2020_04 = as.integer(date ==  yearmonth("2020 Apr"))
-    )
+      pulse_2020_04 = as.integer(date ==  yearmonth("2020 Apr")) 
+    ) |> 
+    select(-ym)
 }
 
-train_U <- add_pw(train_U)
+train_U <- train_U |>
+  as_tsibble(index = date) |>
+  add_pw()
 
 # Fit models 
 fit_U <- train_U |> 
@@ -398,7 +404,7 @@ fit_U <- train_U |>
     sarima211 = ARIMA(U ~ 1 + pdq(2,1,1) + PDQ(1,0,0)),
     piece = ARIMA(U ~ 1 + pdq(1,1,1) + D_2008 + D_2012 + R_2020),
     step = ARIMA(U ~ fourier(K = 2) + step_2020_03 + pulse_2020_04 + pdq(2,1,1))
-  )
+  ) 
 
 # Examine fit  
 glance(fit_U) |> arrange(AICc)
@@ -410,21 +416,25 @@ fit_U |>
 fit_U |> 
   select(arima211) |>
   gg_tsresiduals()
+```
 
-# Ljung-Box test
+Although both models fall short of strictly meeting the residual whiteness criterion, particularly since the degrees of freedom were not clearly defined in the test results, we use them here mainly for relative comparison of performance. Visual inspection of the residual plots suggests that the residuals are approximately normally distributed, with only a small share of autocorrelation coefficients exceeding the significance bounds in the ACF plot. As a general rule of thumb, if fewer than about 5% of the lags lie outside these bounds, the residuals can reasonably be treated as white noise.
+
+```{r fitting-u-model-residual-test}
+# Ljung-Box test - without defining dof - not a sensitive test  
 lb_tbl <- fit_U |>
   augment() |> 
   features(.innov, ljung_box, lag = 12) |>
   select(.model, lb_stat, lb_pvalue) |> 
   arrange(desc(lb_pvalue)) |> 
   print()
-
 ```
 
-
 ## Mining Trend 
-PS: oscillates around ~0; no permanent trend; seasonality tiny; long multi-year swings; we also found a structural break (ZA test).
-```{r}
+
+The mining trend PS oscillates around zero and appears mean-reverting with no evidence ofpermanent trend. Seasonality is present but relatively stable across years, while longer multi-year swings suggest the need for more flexible seasonal modelling. The residuals still display structure, with a clear AR(1) cut-off rather than pure white noise, and one order of differencing is likely required.
+
+```{r fitting-ps-plot}
 PS_stl <- factor_trends_ts |> 
   model(stl = STL(PS))
 
@@ -435,25 +445,99 @@ PS_stl |>
 
 ggtsdisplay(factor_trends_ts$PS, main = "ACF and PACF with Mining Trend PS")
 
-train_PS <- factor_trends_ts |> 
+train_PS <- factor_trends_ts |>
   select(date, PS) |>
-  filter(date < yearmonth("2023 Jan"))
+  filter(date < yearmonth("2023 Jan")) |>
+  as_tsibble(index = date)
 
 test_PS <- factor_trends_ts |> 
   select(date, PS) |>
-  filter(date >= yearmonth("2023 Jan"))
+  filter(date >= yearmonth("2023 Jan")) |>
+  as_tsibble(index = date)
+```
+
+We experimented with several models for this series. First, we used a robust STL decomposition to separate the seasonal component from the low-frequency movement, then modelled the seasonally adjusted series with a simple ARIMA while allowing seasonality to be captured by a seasonal naïve. Introducing a single difference in the short-memory component produced a stable fit and whitened residuals. 
+
+Since earlier analysis suggested the series could be rendered stationary by accounting for structural breaks, we explored two additional approaches. The first was an ARFIMA model, where deterministic seasonality and a known 2011 level shift were removed before estimating the fractional differencing parameter d. With `d < 0.5`, this indicated that full first-differencing may not be required. Finally, we de-seasonalised with STL, identified level breaks, introduced six step dummies at the detected dates, and captured the remaining short-memory with an ARMA specification on the regression residuals, which satisfied the Ljung–Box test for whiteness.
+
+```{r fitting-ps-model}
+# 1. STL can only fit random walk with drift otherwise ARMA term reports null model 
+fit_PS1 <- train_PS |>
+  model(
+    stl = decomposition_model(
+      STL(PS ~ season(window = "periodic") + # s window fixed seasonal shape
+               trend(window = 13), # t window: annual smoothing, mean-reverting dynamic while not over-smoothing
+          robust = TRUE),
+      ARIMA(season_adjust ~ pdq(1,1,1)), 
+      SNAIVE(season_year) # seasonal component model
+    )
+  )
+
+fit_PS1 |> gg_tsresiduals()
+augment(fit_PS1) |> features(.innov, ljung_box, lag = 24, dof = 3) #P value pass the test 
+
+# 2. ARFIMA to determine differencing 
+base <- train_PS |>
+  mutate(step_2011 = as.integer(date >= yearmonth("2011 Apr")))
+fit_PS2 <- base |>
+  model(tslm = TSLM(PS ~ season() + step_2011))
+
+fit_PS2_aug <- augment(fit_PS2)
+fit_PS2_resid  <- fit_PS2_aug$.resid
+y_ts <- ts(fit_PS2_resid, start = c(year(base$date[1]), month(base$date[1])), frequency = 12)
+
+fit_PS2 <- fracdiff::fracdiff(y_ts, nar = 1, nma = 1)      # ARFIMA(1,d,1)
+#fit_PS2$d   
+Box.test(residuals(fit_PS2), lag = 24, type = "Ljung")  #P value pass the test 
+
+# 3. Add more breaks and feed MA(1) on residuals. 
+y_ts <- ts(train_PS$PS,
+           start = c(year(train_PS$date[1]), month(train_PS$date[1])),
+           frequency = 12)
+
+# STL de-seasonalise
+stl_fit <- stats::stl(y_ts, s.window = "periodic", robust = TRUE)
+sa <- seasadj(stl_fit)  # seasonally adjusted
+
+# breaks in level of de-seasonalised series
+bp <- strucchange::breakpoints(sa ~ 1, h = 12)  
+#zoo::as.yearmon(strucchange::breakdates(bp, breaks = bp$breaks.opt))
+
+fit_PS3 <- train_PS |>
+  mutate(
+    step2003 = as.integer(date >= yearmonth("2003 Jun")),
+    step2005 = as.integer(date >= yearmonth("2005 Feb")),
+    step2007 = as.integer(date >= yearmonth("2007 Feb")),
+    step2010 = as.integer(date >= yearmonth("2010 Jul")),
+    step2013 = as.integer(date >= yearmonth("2013 Jun")),
+    step2015 = as.integer(date >= yearmonth("2015 Feb"))
+  ) |>
+  model(tslm = TSLM(PS ~ season() + step2003 + step2005 + step2007 +
+                                step2010 + step2013 + step2015))
+
+det_aug <- augment(fit_PS3)
+resid_ts <- ts(det_aug$.resid,
+               start = c(year(min(train_PS$date)), month(min(train_PS$date))),
+               frequency = 12)
+
+m_ma1 <- Arima(resid_ts, order = c(1,0,1))  
+
+Box.test(residuals(m_ma1), lag = 24, type = "Ljung") 
 ```
 
 ## Forecast Performance 
 
-```{r}
+(WIP - on the PS fan width is too wide - will re-examine the model)
+
+```{r forecast-U-PS}
 # Forecast - 10 years
 h <- 120
+fit_U <- fit_U |> select(arima211)
 fc_U  <- fabletools::forecast(fit_U,  h = h, level = c(80, 95))
-# fc_PS <- fabletools::forecast(fit_PS, h = h, level = c(80, 95))
+fc_PS <- forecast::forecast(fit_PS1, h = h, level = c(80, 95))
 
 # Fan width 
-  fcbands_U <- fc_U |> 
+fcbands_U <- fc_U |> 
   as_tibble() |> 
   mutate(
     lo80 = quantile(U, 0.10),
@@ -465,85 +549,137 @@ fc_U  <- fabletools::forecast(fit_U,  h = h, level = c(80, 95))
   ) |> 
   select(.model, date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
   
-width_summary <- fcbands_U |>
+width_summary_U <- fcbands_U |>
   group_by(.model) |> 
   summarise(
     width80_range = max(width80) - min(width80),
     width95_range = max(width95) - min(width95)
   ) |> print()
 
-last_row <- fcbands_U |> filter(date == max(date))
+last_row_U <- fcbands_U |> filter(date == max(date))
 
 # Forecast plot with fan width at last obs 
 autoplot(fc_U, factor_trends_ts) +
-  geom_segment(data = last_row,
+  geom_segment(data = last_row_U,
                aes(x = date, xend = date, y = lo80, yend = hi80, colour = .model),
                linewidth = 0.8) +
-  geom_text(data = last_row,
+  geom_text(data = last_row_U,
             aes(x = date, y = hi80,
                 label = sprintf("w80 = %.4f", width80),
                 colour = .model),
             vjust = -0.6, size = 2.5)
 
-# Plot the forecasts
-#autoplot(fc_U, factor_trends_ts)
-# autoplot(fc_PS, factor_trends_ts) 
+# PS 
+fcbands_PS <- fc_PS |> 
+  as_tibble() |> 
+  mutate(
+    lo80 = quantile(PS, 0.10),
+    hi80 = quantile(PS, 0.90),
+    lo95 = quantile(PS, 0.025),
+    hi95 = quantile(PS, 0.975),
+    width80 = hi80 - lo80,
+    width95 = hi95 - lo95
+  ) |> 
+  select(.model, date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
+
+width_summary_PS <- fcbands_PS |>
+  group_by(.model) |> 
+  summarise(
+    width80_range = max(width80) - min(width80),
+    width95_range = max(width95) - min(width95)
+  ) |> print()
+
+last_row_PS <- fcbands_PS |> filter(date == max(date))
+
+autoplot(fc_PS, factor_trends_ts) +
+  geom_segment(data = last_row_PS,
+               aes(x = date, xend = date, y = lo80, yend = hi80, colour = .model),
+               linewidth = 0.8) +
+  geom_text(data = last_row_PS,
+            aes(x = date, y = hi80,
+                label = sprintf("w80 = %.4f", width80),
+                colour = .model),
+            vjust = -0.6, size = 2.5)
 ```
 
-From the forecast fan plot, we can first see that the random walk with drift produces very narrow forecast intervals, because it assumes only linear variance growth with horizon and ignores short-run autocorrelation. By contrast, the auto-ARIMA specification captures AR and MA dynamics, which propagate uncertainty further into the future, resulting in wider intervals. 
-
-The two alternative models for the national trend U lead to very different conclusions when compared with δPS. The random walk with drift produces unrealistically narrow intervals, while the auto-ARIMA specification not only achieves a much lower AICc but also yields forecast intervals that better reflect the underlying uncertainty. For this reason, we continue with the auto-ARIMA model in our boundedness comparison.
-
-Based on the average 10-year forecast ranges, the δPS spread consistently shows narrower prediction intervals than the national trend U. This indicates that the spread is likely to remain more contained over the next decade, a conclusion supported by both the summary statistics and the forecast visualisations.
-
-
-## Factor Model Application on SA4 regions 
+## Factor Model Application on Major City and SA4 Regions 
 
 ### Identify under-performing regions - Baseline Factor Model Fit on SA4 regions
 
-We now turn to evaluating how well the factor model captures the variation in individual SA4 indexes.
+We now turn to evaluating how well the factor model captures the variation in individual major city and SA4 indexes. R² measures the share of variation in each major city or SA4 housing index that our factor model explains. 
 
-R² measures the share of variation in each SA4 housing index that our factor model explains. Across SA4 regions, the mean R² is approximately 0.988 and the median is 0.993, indicating the model captures almost all of the observed variation. 
+**For major cities and rest-of-state:** Most city and regions have an R² value above 0.98. The extremes highlight clear spatial patterns:
 
+* Top cities and rest-of-state: Large east-coast capitals and their surrounding belts.
 
-```{r}
-# Filter the SA4 regions in the coefficient data 
-reg_sa4 <- reg_coefs |> filter(region_level == "sa4_name")
+* Bottom cities and rest-of-state: Smaller or resource-dependent markets.
 
-ggplot(reg_sa4, aes(x = r2)) +
-  geom_histogram(bins = 20) +
-  stat_bin(
-    bins = 20,
-    geom = "text",
-    aes(y = after_stat(count), label = after_stat(percent(
-      count / sum(count), accuracy = 1 # Add % for counts at each bar 
-    ))),
-    vjust = -0.4,
-    size = 3
-  ) +
-  scale_y_continuous(expand = expansion(mult = c(0, 0.12))) +
-  labs(title = "Distribution of R² across SA4 regions", x = "R²", y = "Count")
+```{r city-diagnostics}
+reg_city <- reg_coefs |> filter(region_level == "major_city")
 
-# Rank the regions by r2 and print top and bottom 15 
-ranked <- reg_sa4 |>
+# Rank the major cities by r2 and print top and bottom 10 
+ranked_city <- reg_city |>
   arrange(desc(r2)) |>
   mutate(rank = row_number())
 
-top10 <- ranked |>
+top10_city <- ranked_city |>
+  slice_head(n = 5) |>
+  transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
+
+bottom10_city <- ranked_city |>
+  slice_tail(n = 5) |>
+  arrange(r2) |>
+  transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
+
+tbl_rank_city <- top10_city |>
+  full_join(bottom10_city, by = "row", suffix = c("_Top", "_Bottom")) |>
+  select(Rank_Top, Region_Top, R2_Top, Rank_Bottom, Region_Bottom, R2_Bottom)
+
+kable(
+  tbl_rank_city,
+  caption = "Top 5 and Bottom 5 Major City and Area by R²",
+  digits = 4,
+  col.names = c("Rank", "Region", "R\u00B2", "Rank", "Region", "R\u00B2"),
+  escape = FALSE
+) |>
+  kable_styling(full_width = TRUE,
+                bootstrap_options = c("striped", "condensed")) |>
+  add_header_above(c("Top 5" = 3, "Bottom 5" = 3)) |>
+  column_spec(1, width = "4em") |>
+  column_spec(4, width = "4em") |>
+  column_spec(3, width = "6em") |>
+  column_spec(6, width = "6em")
+```
+
+**For SA4 regions**: The SA4 regions shares the same stories. R² is tightly concentrated near 1.0 with the majority of SA4s exceed 0.98, with only a small left tail (a few around 0.92 – 0.95). The top and bottom lists identify the extremes and show recurring patterns across those regions: 
+
+* Top 10 regions: Concentrated in the large east-coast capitals and surrounding belts.
+* Bottom 10 regions : Dominated by Western Australia and Queensland’s mining exposed regions.
+
+```{r sa4-diagnostics}
+# Filter the SA4 regions in the coefficient data 
+reg_sa4 <- reg_coefs |> filter(region_level == "sa4_name")
+
+# Rank the regions by r2 and print top and bottom 10 
+ranked_sa4 <- reg_sa4 |>
+  arrange(desc(r2)) |>
+  mutate(rank = row_number())
+
+top10_sa4 <- ranked_sa4 |>
   slice_head(n = 10) |>
   transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
 
-bottom10 <- ranked |>
+bottom10_sa4 <- ranked_sa4 |>
   slice_tail(n = 10) |>
   arrange(r2) |>
   transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
 
-tbl_rank <- top10 |>
-  full_join(bottom10, by = "row", suffix = c("_Top", "_Bottom")) |>
+tbl_rank_sa4 <- top10_sa4 |>
+  full_join(bottom10_sa4, by = "row", suffix = c("_Top", "_Bottom")) |>
   select(Rank_Top, Region_Top, R2_Top, Rank_Bottom, Region_Bottom, R2_Bottom)
 
 kable(
-  tbl_rank,
+  tbl_rank_sa4,
   caption = "Top 10 and Bottom 10 SA4 Regions by R²",
   digits = 4,
   col.names = c("Rank", "Region", "R\u00B2", "Rank", "Region", "R\u00B2"),
@@ -558,12 +694,27 @@ kable(
   column_spec(6, width = "6em")
 ```
 
-R² is tightly concentrated near 1.0 with the majority of SA4s exceed 0.98, with only a small left tail (a few around 0.92 – 0.95). The top and bottom lists identify the extremes and show recurring patterns across those regions: 
-
-* Top 10 regions: Concentrated in the large east-coast capitals and surrounding belts.
-* Bottom 10 regions : Dominated by Western Australia and Queensland’s mining exposed regions.
+Both SA4 regions and major cities display highly concentrated R² distributions with major cities showing less variation.
 
 ```{r}
+dist_comp <- bind_rows(
+  reg_sa4 |> transmute(group = "SA4 (n=88)", r2),
+  reg_city |> transmute(group = "Major cities (n=15)", r2)
+)
+ggplot(dist_comp, aes(x = r2, y = group)) +
+  ggdist::stat_slab(aes(thickness = after_stat(pdf)),
+                    adjust = 1,
+                    alpha = 0.5) +
+  ggdist::stat_pointinterval(.width = c(0.5, 0.8, 0.95), point_size = 1.8) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "R² distribution: SA4 vs major cities", x = "R²", y = NULL) +
+  theme_minimal(base_size = 12)
+```
+The choropleth reinforces the findings from the summary table, as we can see that the east-coast capitals and coastal belts from Melbourne through Sydney into the South-East of Queensland show the strongest fit,  with most regional NSW/VIC also high. While fit weakens inland and to the west, notably across Western Australia and along Queensland’s mining belts; The dark purple areas mark the lowest R² and are typically remote and resource-exposed regions with possible boom–bust timing and sparse transactions that our three factors don’t fully capture.
+
+Hence, we’ll prioritise Western Australia and Queensland’s mining-exposed regions for residual diagnostics, where we expect autocorrelation and regime shifts for trial enhancements. 
+
+```{r sa4-diagnostic-plot}
 # Match names between reg_sa4 and sa4 shapefile
 norm <- function(x) {
   x |>
@@ -573,19 +724,49 @@ norm <- function(x) {
     str_squish()
 }
 
-# Prepare the 88 regions to keep
+# Filter city and geo coord 
+major_cities <- c(
+  "AUSTRALIAN CAPITAL TERRITORY",
+  "GREATER ADELAIDE",
+  "GREATER BRISBANE",
+  "GREATER DARWIN",
+  "GREATER HOBART",
+  "GREATER MELBOURNE",
+  "GREATER PERTH",
+  "GREATER SYDNEY"
+)
+
+city_r2 <- reg_coefs |>
+  filter(region %in% major_cities) |>
+  transmute(city = region, r2)
+
+city_coords <- tibble::tribble(
+  ~city, ~lon, ~lat,
+  "GREATER SYDNEY", 151.21, -33.87,
+  "GREATER MELBOURNE", 144.96, -37.81,
+  "GREATER BRISBANE", 153.03, -27.47,
+  "GREATER PERTH", 115.86, -31.95,
+  "GREATER ADELAIDE", 138.60, -34.93,
+  "GREATER HOBART", 147.33, -42.88,
+  "GREATER DARWIN", 130.84, -12.46,
+  "AUSTRALIAN CAPITAL TERRITORY", 149.13, -35.28
+)
+
+city_mapdata <- city_r2 |> left_join(city_coords, by = "city")
+
+# Prepare the 88 regions 
 keep88 <- reg_sa4 |>
   mutate(region_norm = norm(region)) |>
   distinct(region_norm)
 
-# Clean shapefile + keep only the 88 + join r2 
+# Clean shapefile + keep regions + join r2 
 sa4_r2 <- sa4 |>
   mutate(region_norm = norm(SA4_NAME21)) |>
   # drop empty geometries and special APS areas
   filter(!st_is_empty(geometry)) |>
   filter(!str_detect(region_norm, "^MIGRATORY\\s+OFFSHORE\\s+SHIPPING"),
          !str_detect(region_norm, "^NO\\s+USUAL\\s+ADDRESS")) |>
-  semi_join(keep88, by = "region_norm") |> # Keep only the 88 sa4
+ semi_join(keep88, by = "region_norm") |> # Keep only the 88 sa4
   left_join( # Join r2 
     reg_sa4 |>
       mutate(region_norm = norm(region)) |>
@@ -594,19 +775,20 @@ sa4_r2 <- sa4 |>
   )
 
 # Plot the r2 distribution 
-ggplot(sa4_r2) +
-  geom_sf(aes(fill = r2), linewidth = 0.1) +
+ggplot() +
+  geom_sf(data = sa4_r2, aes(fill = r2), linewidth = 0.1, colour = "grey70") +
+  scale_fill_viridis_c(name = "SA4 R²", labels = percent) +
+  geom_point(data = city_mapdata, aes(x = lon, y = lat), colour = "red", size = 1) +
+  ggrepel::geom_label_repel(
+  data = city_mapdata,
+  aes(x = lon, y = lat, label = paste0(city, "\n", scales::percent(r2, 0.01))),
+  size = 1.5, label.padding = unit(0.05, "lines"), label.r = unit(0.05, "lines"),    
+  label.size = 0.15, box.padding = 0.2, seed = 42) +
   coord_sf() +
-  scale_fill_viridis_c(name = "R²") +
-  labs(title = "SA4 R² from factor model") +
-  theme_void()
+  labs(title = "Factor model R² distribution across cities & regions") +
+  theme_void(base_size = 12)
 ```
-
-The choropleth reinforces the findings from the summary table, as we can see that the east-coast capitals and coastal belts from Melbourne through Sydney into the South-East of Queensland show the strongest fit,  with most regional NSW/VIC also high. While fit weakens inland and to the west, notably across Western Australia and along Queensland’s mining belts; The dark purple areas mark the lowest R² and are typically remote and resource-exposed regions with possible boom–bust timing and sparse transactions that our three factors don’t fully capture.
-
-Hence, we’ll prioritise Western Australia and Queensland’s mining-exposed regions for residual diagnostics, where we expect autocorrelation and regime shifts for trial enhancements. 
-
-### Inspect residual 
+###Inspect residual 
 
 ```{r}
 #pivot your SA4 index (wide → long)
@@ -660,7 +842,7 @@ To keep the report concise, we highlight two plots: the 12-month rolling standar
 
 Finally, we calculated the proportion of time (by 12 and 24 months respectively) in which δPS had a lower spread than U, giving a simple measure of how often it was more bounded.
 
-```{r}
+```{r eval = FALSE}
 # Load df 
 factor_trends_ana <- factor_trends |>
   select(month_date, U = market, PS = mining) 
@@ -697,7 +879,7 @@ kable(global_ratio, caption = "Global Summary Statistics")
 
 The global ratios are all well below 1, meaning δPS has consistently lower spread than U across all four measures. This supports δPS being more bounded overall.
 
-```{r}
+```{r eval = FALSE}
 # Rolling window config (12 and 24 months) 
 w12 <- 12
 w24 <- 24
@@ -733,7 +915,7 @@ roll_stats <- factor_trends_ana |>
   )
 ```
 
-```{r}
+```{r eval = FALSE}
 # Rolling 12-month SD plot 
 sd12_long <- roll_stats |>
   select(month_date, sd12_U, sd12_PS) |>
