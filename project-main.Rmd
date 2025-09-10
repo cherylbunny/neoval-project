@@ -380,11 +380,11 @@ add_pw <- function(df) {
     mutate(
       ym = yearmonth(date),
       # steps
-      D_2008 = as.integer(date >= yearmonth("2008 Jan")),
-      D_2012 = as.integer(date >= yearmonth("2012 Jan")),
-      R_2020 = pmax(0L, as.integer(yearmonth(date) - yearmonth("2020 Mar"))),
-      step_2020_03  = as.integer(date >= yearmonth("2020 Mar")),
-      pulse_2020_04 = as.integer(date ==  yearmonth("2020 Apr")) 
+      step2008 = as.integer(date >= yearmonth("2008 Jan")), #step 
+      step2012 = as.integer(date >= yearmonth("2012 Jan")),
+      ramp2020 = pmax(0L, as.integer(yearmonth(date) - yearmonth("2020 Mar"))), #ramp 
+      step2020_03  = as.integer(date >= yearmonth("2020 Mar")),
+      pulse2020_04 = as.integer(date ==  yearmonth("2020 Apr")) #pulse 
     ) |> 
     select(-ym)
 }
@@ -402,8 +402,8 @@ fit_U <- train_U |>
     arima110  = ARIMA(U ~ 1 + fourier(K = 2) + pdq(1,1,0)),
     arima111  = ARIMA(U ~ 1 + fourier(K = 2) + pdq(1,1,1)),
     sarima211 = ARIMA(U ~ 1 + pdq(2,1,1) + PDQ(1,0,0)),
-    piece = ARIMA(U ~ 1 + pdq(1,1,1) + D_2008 + D_2012 + R_2020),
-    step = ARIMA(U ~ fourier(K = 2) + step_2020_03 + pulse_2020_04 + pdq(2,1,1))
+    piece = ARIMA(U ~ 1 + pdq(1,1,1) + step2008 + step2012 + ramp2020),
+    step = ARIMA(U ~ fourier(K = 2) + step2020_03 + pulse2020_04 + pdq(2,1,1))
   ) 
 
 # Examine fit  
@@ -604,7 +604,7 @@ autoplot(fc_PS, factor_trends_ts) +
 
 ## Factor Model Application on Major City and SA4 Regions 
 
-### Identify under-performing regions - Baseline Factor Model Fit on SA4 regions
+### Goodness of Fit
 
 We now turn to evaluating how well the factor model captures the variation in individual major city and SA4 indexes. R² measures the share of variation in each major city or SA4 housing index that our factor model explains. 
 
@@ -614,7 +614,7 @@ We now turn to evaluating how well the factor model captures the variation in in
 
 * Bottom cities and rest-of-state: Smaller or resource-dependent markets.
 
-```{r city-diagnostics}
+```{r model-r2-city}
 reg_city <- reg_coefs |> filter(region_level == "major_city")
 
 # Rank the major cities by r2 and print top and bottom 10 
@@ -656,7 +656,7 @@ kable(
 * Top 10 regions: Concentrated in the large east-coast capitals and surrounding belts.
 * Bottom 10 regions : Dominated by Western Australia and Queensland’s mining exposed regions.
 
-```{r sa4-diagnostics}
+```{r model-r2-sa4}
 # Filter the SA4 regions in the coefficient data 
 reg_sa4 <- reg_coefs |> filter(region_level == "sa4_name")
 
@@ -696,7 +696,7 @@ kable(
 
 Both SA4 regions and major cities display highly concentrated R² distributions with major cities showing less variation.
 
-```{r}
+```{r model-r2-comp}
 dist_comp <- bind_rows(
   reg_sa4 |> transmute(group = "SA4 (n=88)", r2),
   reg_city |> transmute(group = "Major cities (n=15)", r2)
@@ -714,7 +714,7 @@ The choropleth reinforces the findings from the summary table, as we can see tha
 
 Hence, we’ll prioritise Western Australia and Queensland’s mining-exposed regions for residual diagnostics, where we expect autocorrelation and regime shifts for trial enhancements. 
 
-```{r sa4-diagnostic-plot}
+```{r model-r2-dist-plot}
 # Match names between reg_sa4 and sa4 shapefile
 norm <- function(x) {
   x |>
@@ -788,35 +788,29 @@ ggplot() +
   labs(title = "Factor model R² distribution across cities & regions") +
   theme_void(base_size = 12)
 ```
-###Inspect residual 
 
-```{r}
-#pivot your SA4 index (wide → long)
-options(scipen = 999, digits = 10)
+### Residual Autocorrelation
 
-sa4_indexes_long <- sa4_indexes |>
-  mutate(month_date = as.Date(month_date)) |>
-  pivot_longer(-month_date, names_to = "region", values_to = "y") 
+At this stage, the model does not incorporate any time dynamics in the residuals. While it explains a substantial share of the variance for both cities and regions, the trending and autocorrelated nature of housing indexes means that the residuals themselves display extremely strong positive autocorrelation. This is evident in the Durbin–Watson statistics, which are close to zero across all regions: Major cities cluster around 0.02 to 0.05, while SA4 regions have a slightly broader range, extending up to 0.2, but still remain far below the benchmark value of 2. This pattern underscores the limitations of using a static regression framework without accounting for time-series dynamics.
 
-# Rename coefficients to avoid duplicates 
-coefs <- reg_sa4 |>
-  rename(beta_market = market,
-         beta_mining = mining,
-         beta_lifestyle = lifestyle)
-
-# compute fitted and residual for every r and t
-panel <- sa4_indexes_long |>
-  left_join(
-    factor_trends |>
-      mutate(month_date = as.Date(month_date)) |>
-      select(month_date, market, mining, lifestyle),
-    by = "month_date"
-  ) |>
-  left_join(coefs, by = "region") |>
-  mutate(
-    fitted = alpha + beta_market*market + beta_mining*mining + beta_lifestyle*lifestyle,
-    resid  = y - fitted
+```{r dw-stat}
+reg_coefs |>
+  group_by(region_level) |> 
+  summarise(
+    dw_min   = min(durbin_watson),
+    dw_max   = max(durbin_watson),
+    dw_mean  = mean(durbin_watson),
+    dw_median= median(durbin_watson), 
+    range = max(durbin_watson) - min(durbin_watson)
   )
+
+ggplot(reg_coefs, aes(x = region_level, y = durbin_watson, fill = region_level)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  labs(title = "Durbin–Watson by region type",
+       x = "", y = "Durbin–Watson") +
+  coord_cartesian(ylim = c(0, 0.25)) + 
+  theme_linedraw()
 ```
 
 # Improve Model by Time-dependent Coefficients 
