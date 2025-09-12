@@ -36,6 +36,7 @@ library(sf)
 library(distributional) 
 library(glue)
 library(readxl)
+library(GGally)
 #library(plotly)
 ```
 
@@ -53,7 +54,9 @@ reg_coefs <- read_csv("data/df_reg_coefs.csv")
 # PC score and loadings 
 pcs <- read_csv("data/df_pcs.csv")
 eofs_city <- read_csv("data/df_eofs_city.csv")
-eofs <- read_csv("data/df_eofs.csv")
+#eofs_sa2 <- read_csv("data/df_eofs.csv")
+eofs_sa4 <- read_csv("data/df_eofs_sa4.csv")
+
 
 # Economic data - need cleaning 
 #gdp_mining <- read_xlsx("data/data.xlsx")
@@ -98,8 +101,8 @@ factor_trends <- factor_trends |>
   inner_join(com_PS, by = "month_date")
 ```
 
-```{r find-pc3-proxy, eval = FALSE}
-# Prepare the data we need - city pc loadings, pc scores, lifestyle trend 
+```{r pc3-proxy-current, eval = FALSE}
+# Prepare the data we need - pc loadings, pc scores, lifestyle trend 
 pc3_pxy <- eofs_city |> 
   filter(mode == 2) |> 
   arrange(loading_value)
@@ -108,23 +111,23 @@ Z3 <- pcs |>
   filter(mode == 2) |>  
   select(period, pc_value)
 
-# Melbourne – Rest of QLD
-MQ_raw <- city_indexes |> 
+# Melbourne – Rest of NSW
+MN_raw <- city_indexes |> 
   select(month_date, rest_of_nsw, greater_melbourne)
 
 U_raw <- factor_trends |> 
   select(month_date, market) 
 
-com_MQ <- MQ_raw |> inner_join(U_raw, by = "month_date")
+com_MN <- MN_raw |> inner_join(U_raw, by = "month_date")
 
-mu_rest_nsw   <- com_MQ$`rest_of_nsw`
-mu_melbourne  <- com_MQ$`greater_melbourne`
-U          <- com_MQ$market 
+mu_rest_nsw   <- com_MN$`rest_of_nsw`
+mu_melbourne  <- com_MN$`greater_melbourne`
+U          <- com_MN$market 
 
 alpha1 <- cov(mu_rest_nsw, U, use = "complete.obs") /
          cov(mu_melbourne, U, use = "complete.obs")
 
-com_MQ <- com_MQ |> 
+com_MN <- com_MN |> 
   mutate(lifestyle_1 = `rest_of_nsw` - alpha1 * `greater_melbourne`) |> 
   select(month_date, lifestyle_1)
 
@@ -141,7 +144,7 @@ lifestyle_cmp <- factor_trends_1 |>
     lifestyle1_std = as.numeric(scale(lifestyle_1))
   )
 
-plot_lifestyle_cmp <- lifestyle_cmp |> 
+lifestyle_cmp |> 
   select(period, z3_std, lifestyleorg_std, lifestyle1_std ) |> 
   pivot_longer(-period, names_to = "series", values_to = "value") |> 
   mutate(series = recode(series,
@@ -153,8 +156,93 @@ plot_lifestyle_cmp <- lifestyle_cmp |>
   labs(x = "Period", y = "Standardised value", colour = "Series",
        title = "Current ") +
   theme_minimal()
+```
 
-plot_lifestyle_cmp 
+```{r pc3-proxy-new, eval = FALSE}
+Z3 <- pcs |> 
+  filter(mode == 2) |>  
+  select(period, pc_value)
+
+pc3_pxy_sa4 <- eofs_sa4 |> 
+  filter(mode == 2) |> 
+  arrange(loading_value)
+
+sa4_raw <- sa4_indexes |>
+  select(
+    month_date,
+    # NEGATIVE basket 
+    `MELBOURNE - INNER`, `MELBOURNE - INNER EAST`, `MELBOURNE - INNER SOUTH`,
+    `MELBOURNE - SOUTH EAST`, `MELBOURNE - NORTH EAST`, `MELBOURNE - NORTH WEST`,
+    `MELBOURNE - OUTER EAST`, `MELBOURNE - WEST`,
+    `SYDNEY - CITY AND INNER SOUTH`, `SYDNEY - INNER WEST`, `SYDNEY - INNER SOUTH WEST`,
+    `SYDNEY - RYDE`, `SYDNEY - PARRAMATTA`,
+    # POSITIVE basket
+    `SUNSHINE COAST`, `GOLD COAST`, `MID NORTH COAST`, `RICHMOND - TWEED`,
+    `COFFS HARBOUR - GRAFTON`, `CENTRAL COAST`, `WIDE BAY`,
+    `HUNTER VALLEY EXC NEWCASTLE`, `ILLAWARRA`, `SOUTHERN HIGHLANDS AND SHOALHAVEN`
+  )
+
+com_pc3 <- sa4_raw |> inner_join(U_raw, by = "month_date")
+
+mu_positive <- rowMeans(com_pc3[, c(
+  "SUNSHINE COAST",
+  "GOLD COAST",
+  "MID NORTH COAST",
+  "RICHMOND - TWEED",
+  "CENTRAL COAST",
+  "WIDE BAY",
+  "HUNTER VALLEY EXC NEWCASTLE",
+  "COFFS HARBOUR - GRAFTON",
+  "ILLAWARRA",
+  "SOUTHERN HIGHLANDS AND SHOALHAVEN"
+)])
+
+mu_negative <- rowMeans(com_pc3[, c(
+  "MELBOURNE - INNER",
+  "MELBOURNE - INNER EAST",
+  "MELBOURNE - INNER SOUTH",
+  "MELBOURNE - SOUTH EAST",
+  "SYDNEY - CITY AND INNER SOUTH",
+  "SYDNEY - INNER WEST",
+  "SYDNEY - INNER SOUTH WEST",
+  "SYDNEY - PARRAMATTA"
+)])
+U          <- com_pc3$market 
+
+alpha2 <- cov(mu_positive, U, use = "complete.obs") /
+         cov(mu_negative, U, use = "complete.obs")
+
+com_pc3 <- com_pc3 |>
+  mutate(lifestyle_proxy = mu_positive - alpha2 * mu_negative)
+# mutate(lifestyle_proxy = mu_positive - mu_negative)
+
+factor_trends_2 <- factor_trends |> 
+  inner_join(com_pc3, by = "month_date")
+
+lifestyle_cmp <- factor_trends_2 |> 
+  select(month_date, lifestyle, lifestyle_proxy) |>
+  rename(period = month_date) |> 
+  inner_join(Z3, by = "period") |> 
+  mutate(
+    z3_std     = as.numeric(scale(pc_value)),
+    lifestyleorg_std = as.numeric(scale(lifestyle)),
+    lifestyleproxy_std = as.numeric(scale(lifestyle_proxy))
+  )
+
+lifestyle_cmp |> 
+  select(period, z3_std, lifestyleproxy_std) |> 
+  pivot_longer(-period, names_to = "series", values_to = "value") |> 
+  mutate(series = recode(series,
+                         z3_std = "PC3",
+                       #  lifestyleorg_std = "lifestyle original",
+                         lifestyleproxy_std = "Lifestyle proxy")) |> 
+  ggplot(aes(x = as.Date(period), y = value, colour = series)) +
+  geom_line() +
+  labs(x = "Period", y = "Standardised value", colour = "Series",
+       title = "Current ") +
+  theme_minimal()
+
+
 ```
 
 # Introduction 
@@ -812,6 +900,45 @@ ggplot(reg_coefs, aes(x = region_level, y = durbin_watson, fill = region_level))
   coord_cartesian(ylim = c(0, 0.25)) + 
   theme_linedraw()
 ```
+
+## Coefficient Pattern
+
+While R² and Durbin–Watson assess overall fit and residual behaviour, they do not show how regions load onto each factor. Examining coefficient patterns adds this context, revealing whether markets move uniformly with the national trend or diverge due to mining influences.
+
+The distribution of market coefficients is tightly centred around 1.0 with relatively little variation. This indicates that most regions respond in a similar way to the national housing trend. In contrast, the mining coefficients are far more dispersed with a long right tail and several extreme outliers, suggesting that exposure to mining-related dynamics differs substantially across regions.
+
+The scatterplot analysis reveals a clear negative relationship between the market and mining coefficients. Regions with a strong loading on the national market factor tend to exhibit weaker or even negative loadings on the mining factor and vice versa.
+
+```{r coef-pattern}
+reg_coef_long <- reg_coefs |>
+  select(region_level, market, mining) |>
+  pivot_longer(c(market, mining),
+               names_to = "factor", values_to = "coef")
+
+# Density histogram 
+ggplot(reg_coef_long, aes(x = coef, fill = factor)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30, , colour = "white") +
+  geom_density(size = 0.5, fill = NA) +
+  facet_wrap(~factor, scales = "free_x") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Coefficient", y = "Density",
+       title = "Coefficient distributions")
+
+# Pairwise
+cols <- c("market","mining")
+ggpairs(
+  reg_coefs,
+  columns = match(cols, names(reg_coefs)),
+  mapping = aes(colour = region_level),
+  upper = list(continuous = wrap("cor", size = 3)),
+  lower = list(continuous = wrap("smooth_loess", alpha = 0.6, size = 0.6)),
+  diag  = list(continuous = wrap("densityDiag", alpha = 0.6))
+) 
+```
+
+
 
 # Improve Model by Time-dependent Coefficients 
 
