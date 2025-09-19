@@ -37,6 +37,8 @@ library(distributional)
 library(glue)
 library(readxl)
 library(GGally)
+library(zoo)
+library(strucchange)
 #library(plotly)
 ```
 
@@ -170,13 +172,13 @@ pc3_pxy_sa4 <- eofs_sa4 |>
 sa4_raw <- sa4_indexes |>
   select(
     month_date,
-    # NEGATIVE basket 
+    # NEGATIVE basket (urban)
     `MELBOURNE - INNER`, `MELBOURNE - INNER EAST`, `MELBOURNE - INNER SOUTH`,
     `MELBOURNE - SOUTH EAST`, `MELBOURNE - NORTH EAST`, `MELBOURNE - NORTH WEST`,
     `MELBOURNE - OUTER EAST`, `MELBOURNE - WEST`,
     `SYDNEY - CITY AND INNER SOUTH`, `SYDNEY - INNER WEST`, `SYDNEY - INNER SOUTH WEST`,
     `SYDNEY - RYDE`, `SYDNEY - PARRAMATTA`,
-    # POSITIVE basket
+    # POSITIVE basket (coastal)
     `SUNSHINE COAST`, `GOLD COAST`, `MID NORTH COAST`, `RICHMOND - TWEED`,
     `COFFS HARBOUR - GRAFTON`, `CENTRAL COAST`, `WIDE BAY`,
     `HUNTER VALLEY EXC NEWCASTLE`, `ILLAWARRA`, `SOUTHERN HIGHLANDS AND SHOALHAVEN`
@@ -351,6 +353,7 @@ summary(adf_ect)
 The exploratory analysis utilises visualisations to characterise the dynamics of the national trend (U) and the Perth–Sydney spread (δPS), thereby clarifying their underlying properties.
 
 ```{r autoplot}
+# Transform df to tsibble
 factor_trend_ts <- factor_trends |>
   transmute(
     month_date = yearmonth(as.Date(month_date)),
@@ -420,9 +423,11 @@ factor_trends_ts <- factor_trends |>
 # U is non stationary, I(1)
 adf_U <- ur.df(factor_trends_ts$U, type="trend", lags=12)
 kpss_U <- kpss.test(factor_trends_ts$U, null="Trend")
+
 # PS also I(1)
 adf_PS <- ur.df(factor_trends_ts$PS, type="drift", lags=12) 
 kpss_PS <- kpss.test(factor_trends_ts$PS, null="Level")
+
 # PS is stationary with a single structural break at position 53: 2011 Apr
 za <- ur.za(factor_trends_ts$PS, model = "both") 
 ```
@@ -461,7 +466,7 @@ In the modelling process, we evaluated a range of specifications informed both b
 
 Among the fitted models, two candidates emerged as particularly strong. The first, an ARIMA(2,1,1) with Fourier terms (K = 2) and drift. A second competitive specification combined Fourier terms (K = 2) with intervention dummies (step and pulse) and an ARIMA(2,1,1) structure. 
 
-```{r fitting-u-model}
+```{r fit-u-model}
 # Function to add knots - improvement can be done by examining the mining expenditure data 
 add_pw <- function(df) {
   df |> 
@@ -498,7 +503,7 @@ fit_U <- train_U |>
 glance(fit_U) |> arrange(AICc)
 
 fit_U |> 
-  select(step) |>
+  select(arima211) |>
   gg_tsresiduals()
 
 fit_U |> 
@@ -508,7 +513,7 @@ fit_U |>
 
 Although both models fall short of strictly meeting the residual whiteness criterion, particularly since the degrees of freedom were not clearly defined in the test results, we use them here mainly for relative comparison of performance. Visual inspection of the residual plots suggests that the residuals are approximately normally distributed, with only a small share of autocorrelation coefficients exceeding the significance bounds in the ACF plot. As a general rule of thumb, if fewer than about 5% of the lags lie outside these bounds, the residuals can reasonably be treated as white noise.
 
-```{r fitting-u-model-residual-test}
+```{r fit-u-model-residual-test}
 # Ljung-Box test - without defining dof - not a sensitive test  
 lb_tbl <- fit_U |>
   augment() |> 
@@ -520,9 +525,9 @@ lb_tbl <- fit_U |>
 
 ## Mining Trend 
 
-The mining trend PS oscillates around zero and appears mean-reverting with no evidence ofpermanent trend. Seasonality is present but relatively stable across years, while longer multi-year swings suggest the need for more flexible seasonal modelling. The residuals still display structure, with a clear AR(1) cut-off rather than pure white noise, and one order of differencing is likely required.
+The mining trend (PS) oscillates around zero and appears mean-reverting with no evidence ofpermanent trend. Seasonality is present but relatively stable across years, while longer multi-year swings suggest the need for more flexible seasonal modelling. The residuals still display structure, with a clear AR(1) cut-off rather than pure white noise. 
 
-```{r fitting-ps-plot}
+```{r fit-ps-plot}
 PS_stl <- factor_trends_ts |> 
   model(stl = STL(PS))
 
@@ -533,6 +538,7 @@ PS_stl |>
 
 ggtsdisplay(factor_trends_ts$PS, main = "ACF and PACF with Mining Trend PS")
 
+# Split training and testing set 
 train_PS <- factor_trends_ts |>
   select(date, PS) |>
   filter(date < yearmonth("2023 Jan")) |>
@@ -544,87 +550,125 @@ test_PS <- factor_trends_ts |>
   as_tsibble(index = date)
 ```
 
-We experimented with several models for this series. First, we used a robust STL decomposition to separate the seasonal component from the low-frequency movement, then modelled the seasonally adjusted series with a simple ARIMA while allowing seasonality to be captured by a seasonal naïve. Introducing a single difference in the short-memory component produced a stable fit and whitened residuals. 
+The mining trend (PS) captures the dynamics of the resource boom, which we interpret as a one-off structural break rather than a permanent driver. Prices surged sharply during the 2000s mining boom, collapsed around 2012, and have remained stagnant since. If this raw factor is carried forward into forecasts, the boom–bust cycle dominates and produces unstable predictions with excessively wide intervals.
 
-Since earlier analysis suggested the series could be rendered stationary by accounting for structural breaks, we explored two additional approaches. The first was an ARFIMA model, where deterministic seasonality and a known 2011 level shift were removed before estimating the fractional differencing parameter d. With `d < 0.5`, this indicated that full first-differencing may not be required. Finally, we de-seasonalised with STL, identified level breaks, introduced six step dummies at the detected dates, and captured the remaining short-memory with an ARMA specification on the regression residuals, which satisfied the Ljung–Box test for whiteness.
+To address this, we treat the boom as a temporary structural shock. We introduce a dummy variable (set to 1 during the boom/decline period and 0 otherwise) when modelling PS, and then forecast only the residual stationary component. This approach effectively assumes that another boom of comparable scale is unlikely.
 
-```{r fitting-ps-model}
-# 1. STL can only fit random walk with drift otherwise ARMA term reports null model 
-fit_PS1 <- train_PS |>
-  model(
-    stl = decomposition_model(
-      STL(PS ~ season(window = "periodic") + # s window fixed seasonal shape
-               trend(window = 13), # t window: annual smoothing, mean-reverting dynamic while not over-smoothing
-          robust = TRUE),
-      ARIMA(season_adjust ~ pdq(1,1,1)), 
-      SNAIVE(season_year) # seasonal component model
-    )
+The boom and decline phases were identified using the `breakpoints` function from the `strucchange` package, which detected three structural breaks in the series. The segment containing the global peak was classified as the “boom” period, followed by the “decline” period. These periods were then encoded into dummy variables for use in the modelling process.
+
+```{r detect-ps-break}
+ps_df <- train_PS |> 
+  as_tibble() |> 
+  transmute(
+    date = as.Date(date),    
+    PS = as.numeric(PS)   
+  ) |> 
+  arrange(date)
+
+# Partition the series into boom and decline windows based on structural breaks
+ps_zoo <- zoo(ps_df$PS, order.by = ps_df$date)
+y  <- coredata(ps_zoo)
+ti <- index(ps_zoo)
+n  <- length(y)
+
+# Three trend breaks 
+bp_tr <- breakpoints(ps_zoo ~ time(ps_zoo), breaks = 3)
+
+# Keep the breaks that actually exist 
+idx <- bp_tr$breakpoints
+idx <- idx[!is.na(idx)]
+
+# Segment boundaries
+cuts <- c(0, idx, n) 
+
+# Locate the global peak and the segment that contains it
+peak_i <- which.max(y)
+seg_id <- findInterval(peak_i, cuts) 
+
+# Boom = the whole peak segment, Decline = from end of peak segment to the next boundary
+boom_start <- ti[cuts[seg_id]   + 1]
+boom_end <- ti[cuts[seg_id+1]]
+decline_start <- boom_end
+decline_end <- ti[cuts[pmin(seg_id + 2, length(cuts))]]
+
+# Create dummies
+ps_df <- ps_df |> 
+  mutate(
+    boom_dummy = as.integer(date >= boom_start & date <= boom_end),
+    decline_dummy = as.integer(date > decline_start & date <= decline_end)
   )
 
-fit_PS1 |> gg_tsresiduals()
-augment(fit_PS1) |> features(.innov, ljung_box, lag = 24, dof = 3) #P value pass the test 
+# Fitted piecewise trend for visual check
+fit_tr <- fitted(bp_tr, breaks = length(idx))
 
-# 2. ARFIMA to determine differencing 
-base <- train_PS |>
-  mutate(step_2011 = as.integer(date >= yearmonth("2011 Apr")))
-fit_PS2 <- base |>
-  model(tslm = TSLM(PS ~ season() + step_2011))
+# Plot 
+ggplot(ps_df, aes(date, PS)) +
+  geom_line(colour = "black") +
+  geom_line(aes(y = as.numeric(fit_tr)), colour = "red", linewidth = 0.5) +
+  geom_vline(xintercept = ti[idx], linetype = 2, colour = "blue") +
+  annotate("rect", xmin = boom_start, xmax = boom_end, ymin = -Inf, ymax = Inf,
+           alpha = 0.12, fill = "forestgreen") +
+  annotate("rect", xmin = decline_start, xmax = decline_end, ymin = -Inf, ymax = Inf,
+           alpha = 0.12, fill = "orange") +
+  labs(
+    title = "Mining Time Series of Boom and Decline Windows",
+    subtitle = paste0(
+      "Boom: ", boom_start, " \u2192 ", boom_end,
+      "   |   Decline: ", decline_start, " \u2192 ", decline_end
+    ),
+    x = "Date", y = "Mining factor (Perth-Sydney Spread)"
+  ) +
+  theme_minimal()
+```
 
-fit_PS2_aug <- augment(fit_PS2)
-fit_PS2_resid  <- fit_PS2_aug$.resid
-y_ts <- ts(fit_PS2_resid, start = c(year(base$date[1]), month(base$date[1])), frequency = 12)
+To model the series with the dummy variables, essentially we fit an ARIMA model to the residuals after accounting for the boom and decline periods. The final selected model was an ARIMA(2,0,1) with the boom and decline dummies included as regressors.
 
-fit_PS2 <- fracdiff::fracdiff(y_ts, nar = 1, nma = 1)      # ARFIMA(1,d,1)
-#fit_PS2$d   
-Box.test(residuals(fit_PS2), lag = 24, type = "Ljung")  #P value pass the test 
+```{r add-ps-dummy}
+boom_start <- yearmonth(boom_start)
+boom_end <- yearmonth(boom_end)
+decline_start <- yearmonth(decline_start)
+decline_end <- yearmonth(decline_end)
 
-# 3. Add more breaks and feed MA(1) on residuals. 
-y_ts <- ts(train_PS$PS,
-           start = c(year(train_PS$date[1]), month(train_PS$date[1])),
-           frequency = 12)
-
-# STL de-seasonalise
-stl_fit <- stats::stl(y_ts, s.window = "periodic", robust = TRUE)
-sa <- seasadj(stl_fit)  # seasonally adjusted
-
-# breaks in level of de-seasonalised series
-bp <- strucchange::breakpoints(sa ~ 1, h = 12)  
-#zoo::as.yearmon(strucchange::breakdates(bp, breaks = bp$breaks.opt))
-
-fit_PS3 <- train_PS |>
+# Add in dummies for mining boom and decline periods
+train_PS <- train_PS |> 
   mutate(
-    step2003 = as.integer(date >= yearmonth("2003 Jun")),
-    step2005 = as.integer(date >= yearmonth("2005 Feb")),
-    step2007 = as.integer(date >= yearmonth("2007 Feb")),
-    step2010 = as.integer(date >= yearmonth("2010 Jul")),
-    step2013 = as.integer(date >= yearmonth("2013 Jun")),
-    step2015 = as.integer(date >= yearmonth("2015 Feb"))
-  ) |>
-  model(tslm = TSLM(PS ~ season() + step2003 + step2005 + step2007 +
-                                step2010 + step2013 + step2015))
+    boom    = as.integer(date >= boom_start    & date <= boom_end),
+    decline = as.integer(date >= decline_start & date <= decline_end)
+  )
+```
 
-det_aug <- augment(fit_PS3)
-resid_ts <- ts(det_aug$.resid,
-               start = c(year(min(train_PS$date)), month(min(train_PS$date))),
-               frequency = 12)
+```{r fit-ps-model}
+# Fit ARIMA with residuals after accounting for the dummies 
+fit_PS <- train_PS |>
+  model(
+    arima201 = ARIMA(PS ~ boom + decline + pdq(2,0,1) + PDQ(0,0,0))
+  ) |> 
+  select(arima201)
 
-m_ma1 <- Arima(resid_ts, order = c(1,0,1))  
-
-Box.test(residuals(m_ma1), lag = 24, type = "Ljung") 
+report(fit_PS)
+fit_PS |> 
+  gg_tsresiduals()
 ```
 
 ## Forecast Performance 
 
-(WIP - on the PS fan width is too wide - will re-examine the model)
+For the forecasting stage, we use the best-performing models (ARIMA(2,1,1) with Fourier terms (K = 2) for U and ARIMA(2,0,1) for PS) identified earlier to project values 10 years ahead (120 months). We generate forecasts with prediction intervals at both 80% and 95%. These intervals show the range in which future values are likely to fall, giving us a measure of uncertainty, an 80% interval means there is an 8-in-10 chance that the true value will lie within that range.
 
-```{r forecast-U-PS}
+For evaluation, we set aside one year of data (2023) as a test set. Although a typical split is about 20% of the dataset, our series only spans 25 years, so using 20% would cut off too much valuable information for forecasting. A one-year test period strikes a better balance.
+
+The forecasts indicate that the national trend is expected to rise, with an 80% prediction interval width of 0.6845, reflecting higher uncertainty. In contrast, the mining trend (PS) shows a flatter path, with an 80% interval width of 0.4538. This narrower range reflects greater stability, largely because we excluded the one-off boom and decline period, which would otherwise make the series more volatile.
+
+```{r prediction-interval}
 # Forecast - 10 years
 h <- 120
 fit_U <- fit_U |> select(arima211)
-fc_U  <- fabletools::forecast(fit_U,  h = h, level = c(80, 95))
-fc_PS <- forecast::forecast(fit_PS1, h = h, level = c(80, 95))
+last_idx <- max(train_PS$date)  
+future_PS <- tibble(date = last_idx + (1:h), boom = 0L, decline = 0L) |> as_tsibble(index = date)
 
-# Fan width 
+fc_U  <- fabletools::forecast(fit_U,  h = h, level = c(80, 95))
+fc_PS <- forecast::forecast(fit_PS, new_data = future_PS , h = h, level = c(80, 95))
+
+# Produce fan with for U 
 fcbands_U <- fc_U |> 
   as_tibble() |> 
   mutate(
@@ -636,13 +680,6 @@ fcbands_U <- fc_U |>
     width95 = hi95 - lo95
   ) |> 
   select(.model, date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
-  
-width_summary_U <- fcbands_U |>
-  group_by(.model) |> 
-  summarise(
-    width80_range = max(width80) - min(width80),
-    width95_range = max(width95) - min(width95)
-  ) |> print()
 
 last_row_U <- fcbands_U |> filter(date == max(date))
 
@@ -657,8 +694,8 @@ autoplot(fc_U, factor_trends_ts) +
                 colour = .model),
             vjust = -0.6, size = 2.5)
 
-# PS 
-fcbands_PS <- fc_PS |> 
+# Produce fan width for PS 
+fcbands_PS <- fc_PS  |> 
   as_tibble() |> 
   mutate(
     lo80 = quantile(PS, 0.10),
@@ -669,13 +706,6 @@ fcbands_PS <- fc_PS |>
     width95 = hi95 - lo95
   ) |> 
   select(.model, date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
-
-width_summary_PS <- fcbands_PS |>
-  group_by(.model) |> 
-  summarise(
-    width80_range = max(width80) - min(width80),
-    width95_range = max(width95) - min(width95)
-  ) |> print()
 
 last_row_PS <- fcbands_PS |> filter(date == max(date))
 
@@ -688,6 +718,25 @@ autoplot(fc_PS, factor_trends_ts) +
                 label = sprintf("w80 = %.4f", width80),
                 colour = .model),
             vjust = -0.6, size = 2.5)
+```
+
+The test set results show that the chosen model for U performs consistently with very low error (RMSE = 0.0076, negligible relative to the scale of U). For PS, the model incorporating boom/decline dummies produces out-of-sample forecasts that are on average about 7% off, which is acceptable given the series’ inherently difficult-to-predict behaviour (mining cycle is more volatile than the national market). While the ACF1 values indicate some remaining autocorrelation in the residuals, overall both models demonstrate solid performance.
+
+```{r test-set-performance}
+acc_U <- accuracy(fc_U, test_U) |>
+  select(.model, .type, RMSE, MAE, MAPE)
+
+acc_PS <- accuracy(fc_PS, test_PS) |>
+  select(.model, .type, RMSE, MAE, MAPE)
+
+# Add labels
+acc_U  <- acc_U  |> mutate(series = "U (national)")
+acc_PS <- acc_PS |> mutate(series = "PS (mining)")
+
+# Combine tables 
+acc_all <- bind_rows(acc_U, acc_PS) |>
+  relocate(series, .model, .type) |> 
+  print()
 ```
 
 ## Factor Model Application on Major City and SA4 Regions 
