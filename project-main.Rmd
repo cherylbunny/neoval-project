@@ -1,11 +1,14 @@
 ---
-title: "Housing Market Dynamics"
-subtitle: "From PCA to Factor Models"
+title: "Regional Housing Market Dynamics in Australia"
+subtitle: "A PCA-Based Approach to Factor Models"
 author: "Yiran Yao"
 date: "2025-08-04"
 output:
   html_document:
     css: styles.css
+    toc: true
+    toc_depth: 3
+    toc_float: true
 ---
 
 ```{r setup, include=FALSE}
@@ -173,15 +176,17 @@ sa4_raw <- sa4_indexes |>
   select(
     month_date,
     # NEGATIVE basket (urban)
-    `MELBOURNE - INNER`, `MELBOURNE - INNER EAST`, `MELBOURNE - INNER SOUTH`,
+    `PERTH - SOUTH EAST`, `PERTH - NORTH WEST`, 
+    `MELBOURNE - INNER`, `MELBOURNE - INNER EAST`, `MELBOURNE - INNER SOUTH`, 
     `MELBOURNE - SOUTH EAST`, `MELBOURNE - NORTH EAST`, `MELBOURNE - NORTH WEST`,
     `MELBOURNE - OUTER EAST`, `MELBOURNE - WEST`,
-    `SYDNEY - CITY AND INNER SOUTH`, `SYDNEY - INNER WEST`, `SYDNEY - INNER SOUTH WEST`,
-    `SYDNEY - RYDE`, `SYDNEY - PARRAMATTA`,
     # POSITIVE basket (coastal)
     `SUNSHINE COAST`, `GOLD COAST`, `MID NORTH COAST`, `RICHMOND - TWEED`,
     `COFFS HARBOUR - GRAFTON`, `CENTRAL COAST`, `WIDE BAY`,
-    `HUNTER VALLEY EXC NEWCASTLE`, `ILLAWARRA`, `SOUTHERN HIGHLANDS AND SHOALHAVEN`
+    `HUNTER VALLEY EXC NEWCASTLE`, `ILLAWARRA`, `SOUTHERN HIGHLANDS AND SHOALHAVEN`,
+    `RIVERINA`, `CENTRAL WEST`, `MORETON BAY - NORTH`,
+    `CAPITAL REGION`, `LAUNCESTON AND NORTH EAST`, `COFFS HARBOUR - GRAFTON`
+    
   )
 
 com_pc3 <- sa4_raw |> inner_join(U_raw, by = "month_date")
@@ -196,7 +201,13 @@ mu_positive <- rowMeans(com_pc3[, c(
   "HUNTER VALLEY EXC NEWCASTLE",
   "COFFS HARBOUR - GRAFTON",
   "ILLAWARRA",
-  "SOUTHERN HIGHLANDS AND SHOALHAVEN"
+  "SOUTHERN HIGHLANDS AND SHOALHAVEN",
+  "RIVERINA",
+  "CENTRAL WEST",
+  "MORETON BAY - NORTH",
+  "CAPITAL REGION",
+  "LAUNCESTON AND NORTH EAST",
+  "COFFS HARBOUR - GRAFTON"
 )])
 
 mu_negative <- rowMeans(com_pc3[, c(
@@ -204,19 +215,17 @@ mu_negative <- rowMeans(com_pc3[, c(
   "MELBOURNE - INNER EAST",
   "MELBOURNE - INNER SOUTH",
   "MELBOURNE - SOUTH EAST",
-  "SYDNEY - CITY AND INNER SOUTH",
-  "SYDNEY - INNER WEST",
-  "SYDNEY - INNER SOUTH WEST",
-  "SYDNEY - PARRAMATTA"
+  "PERTH - SOUTH EAST", 
+  "PERTH - NORTH WEST" 
 )])
-U          <- com_pc3$market 
+
+U <- com_pc3$market 
 
 alpha2 <- cov(mu_positive, U, use = "complete.obs") /
          cov(mu_negative, U, use = "complete.obs")
 
 com_pc3 <- com_pc3 |>
   mutate(lifestyle_proxy = mu_positive - alpha2 * mu_negative)
-# mutate(lifestyle_proxy = mu_positive - mu_negative)
 
 factor_trends_2 <- factor_trends |> 
   inner_join(com_pc3, by = "month_date")
@@ -226,25 +235,25 @@ lifestyle_cmp <- factor_trends_2 |>
   rename(period = month_date) |> 
   inner_join(Z3, by = "period") |> 
   mutate(
-    z3_std     = as.numeric(scale(pc_value)),
+    z3_std = as.numeric(scale(pc_value)),
     lifestyleorg_std = as.numeric(scale(lifestyle)),
     lifestyleproxy_std = as.numeric(scale(lifestyle_proxy))
   )
 
+# Visual inspection 
 lifestyle_cmp |> 
   select(period, z3_std, lifestyleproxy_std) |> 
   pivot_longer(-period, names_to = "series", values_to = "value") |> 
   mutate(series = recode(series,
                          z3_std = "PC3",
-                       #  lifestyleorg_std = "lifestyle original",
                          lifestyleproxy_std = "Lifestyle proxy")) |> 
   ggplot(aes(x = as.Date(period), y = value, colour = series)) +
   geom_line() +
   labs(x = "Period", y = "Standardised value", colour = "Series",
-       title = "Current ") +
+       title = "Reconstructing PC3 Using SA4 Region Combinations") +
   theme_minimal()
 
-
+corr_lifestyle <- cor(lifestyle_cmp$pc_value, lifestyle_cmp$lifestyle_proxy, use = "complete.obs")
 ```
 
 # Introduction 
@@ -253,20 +262,78 @@ Traditional approaches to analysing housing indexes, such as hedonic or repeat-s
 
 In the recent research Sijp et al. (2025) propose a new approach that applies Principal Component Analysis (PCA) to regional SA4 level housing indexes, enabling the extraction of key drivers of price movements and offering a deeper understanding of the forces shaping housing markets.
 
-The PCA results show that the first three principal components capture much of the behaviour of local price indexes, as a linear combination of their time series explains most of the variance in the housing index. Nevertheless, the PCA-based linear model lacks robustness across different time windows, and its coefficient estimates must be derived directly from the PCA procedure.
+The PCA results show that the first three principal components capture much of the behavior of local price indexes, as a linear combination of their time series explains most of the variance in the housing index. Nevertheless, the PCA-based linear model lacks robustness across different time windows, and its coefficient estimates must be derived directly from the PCA procedure.
 
-Our exploratory research extends the PCA approach by addressing these limitations through a factor linear model, which uses time series data directly, with independent variables serving as proxies for the PCA-derived principal components.
+Our exploratory research extends the PCA approach by addressing these limitations through a factor linear model, which uses time series data directly, with independent variables serving as proxies for the PCA-derived principal components. We model the factor proxies as time series using forecasting techniques to obtain their projected values. The forecasted factor series are subsequently incorporated into the linear model to generate projected housing price indexes, with time-varying coefficients included to capture evolving dynamics over time.
 
-# Moving from PCA to Factor Model 
+The resulting factor model can be applied for a variety of purposes:
+-   To understand the key drivers of housing price movements at a national and regional level.
+-   To generate forecasts of housing price indexes based on projected factor values.
+-   To assess the impact of macroeconomic variables on housing prices through the regression coefficients.
+
+# Methodologies and Datasets 
+
+## Methodlogies 
+
+### PCA 
+
+Before introducing the factor model, Principal Component Analysis (PCA) was first applied to the original housing indexes. It is therefore useful to briefly revisit PCA and how it allowed us to identify specific factors. This work was originally conducted by Will Sijp, the supervisor of this project, whose detailed analysis can be found in the references. What follows is a short recap.
+
+PCA is a statistical method that reduces complex datasets into a smaller number of uncorrelated components, each capturing a dominant source of variation. In our project, the PC1 explains 96% of the variance, while PC2 and PC3 account for 2.5% and 0.7%, respectively. Together, these three components capture nearly all the variability in the housing indexes.
+
+The loadings from the PCA highlight which regions contribute most strongly to each component. For example, PC2, labelled the “mining” factor, shows high positive loadings in resource-dependent regions, while service-oriented regions display negative loadings. This pattern suggests that PC2 captures the influence of the mining sector on housing markets. By contrast, PC1, the “market” factor, has positive loadings across nearly all regions, reflecting the common national trend in housing prices.
+
+### Factor-Based Substitutes for Principal Components
+
+After defining the factors associated with each principal component (PC), we introduce a linear regression that combines selected housing indexes to approximate the PCs, which are referred to as factor proxies. The objective is to identify interpretable city or regional combinations that closely mirror the PCA-derived components. A proxy is considered valid if it achieves a correlation of at least 96% with the corresponding PC, providing statistical evidence of its suitability. This procedure is not strictly systematic but rather heuristic, involving an iterative search for the most representative mix of cities or regions. More specifically:
+
+* For PC1 proxy the national spread (U), the factor model is specified as: \(\mu_r = \beta_r U + \varepsilon\)
+
+* For the PC2 proxy, the mining spread (Perth–Sydney spread, $\delta_{PS}$), the factor model is specified as: \(\mu_r = \beta_r U + \lambda_r \delta_{PS} + \varepsilon\)
+
+* For PC3 proxy the lifestyle spread (WIP)
+
+### Forecasting of Factors
+
+Once the factor proxies were defined, we modelled each factor series separately using time series forecasting methods. The process included exploratory analysis, stationarity checks, and STL decomposition to characterise the data. Guided by these diagnostics, we selected suitable ARIMA-type models, enhancing them with Fourier terms to capture seasonality and intervention dummies to address structural breaks.
+
+### Integration into a Factor Modelling Framework
+
+The linear model regresses each regional housing index on the factor proxies, yielding coefficients that represent the sensitivity of local markets to the underlying factors: \(\mu_r = \beta_{National} + \lambda_r \delta_{Mining} + \gamma_r \delta_{lifestyle} + \varepsilon\), the coefficients β, λ and γ are estimated for each region r. These coefficients help to capture the response of the local market to each factor. Model performance was evaluated using R-squared and residual diagnostics to check that key assumptions held. Forecasts of the factor proxies were then substituted into the model to obtain projected housing indexes. To account for changing dynamics, coefficients were re-estimated with rolling windows, allowing them to vary over time and better capture evolving market conditions.
+
+## Datasets 
+
+The datasets used in this project come primarily from the Australian Bureau of Statistics (ABS), covering housing price indexes and selected macroeconomic indicators. In addition, we make use of internally developed datasets, including preliminary outputs such as PCA results and estimated static coefficients. All datasets are organised and available in the data folder: 
+
+* Housing indexes (log transformed) on both city level and SA4 level, named `city_indexes` and `indexes_city_and_sa4`
+* PCA results including PC scores and loadings, named `df_pcs`, `df_eofs_city`, and `df_eofs_sa4`
+* Factor proxies identified from PCA results, named `df_factor_trends`
+* Regression coefficients estimated from the factor proxies, named `df_reg_coefs`
+* Geographic data for SA4 regions, named `SA4_2021_AUST_SHP_GDA2020.shp`
+* Economic data including GDP, exchange rate, and mining expenditure, named `data.xlsx`, `key_economic_data.xlsx`, and `mining_expenditure.xlsx` (WIP)
+
+### Data Limitation 
+
+This project faces several dataset-related limitations, including but not limited to the following:
+
+* Historical Scope: PCA results and coefficients are based on 25 years of data (1998–2023), which may not fully reflect future patterns.
+* Macroeconomic Breadth: Available economic indicators are narrow and may miss other important drivers of housing prices.
+* Geographic Coverage: Indexes are only available at city and SA4 levels, limiting insights into finer sub-regional dynamics.
+* Measurement Bias: Indexes rely on hedonic and repeat-sales methods, which involve assumptions that may introduce bias.
+* Proxy Validity: Factor proxies are heuristic choices and may not perfectly represent the underlying principal components.
+* Model Assumptions: Linear regression assumes simple linear relationships, overlooking possible nonlinear interactions.
+* Data Sensitivity: Outcomes are highly data-driven and depend strongly on the chosen datasets and methods.
+* Structural Shocks: Events like the mining boom, COVID-19, or policy shifts may not be well captured by static models or PCA.
+* Endogeneity Risk: Factor spreads (e.g., mining, lifestyle) may themselves be influenced by national trends, complicating interpretation.
+* Forecast Stability: Forecasts rely on static coefficients, which may not hold under changing macroeconomic or demographic conditions.
+
+# Factor trends as PC proxies
 
 The national trend (U) exhibits a close correspondence with PC1 (market), while the Perth–Sydney spread (δPS) aligns with PC2 (mining). Given that these principal components account for the majority of variance in the index, our preliminary analysis focuses on U and δPS, with subsequent extensions planned. (WIP - might add lifestyle)
 
--   Explain on more of why did we move on from PCA to factor model
--   Explain how did we find the factors (like how did we take national as PC1, PS as PC2...)
-
 We examined whether PC2 is better represented by the Brisbane–Sydney or Perth–Sydney spread by comparing the shapes of the standardised series and testing their correlations with PC2. The Perth–Sydney spread aligns more closely with PC2: The scatterplot shows a distribution that falls more evenly along the regression line, and its correlation with PC2 is slightly higher (98% versus 96% for the Brisbane–Sydney spread). While the difference is minor and not statistically significant, the Perth–Sydney spread is the stronger candidate as a proxy for PC2.
 
-```{r examine-pc-corr}
+```{r examine-pc2-corr}
 # Join PC2 with both series 
 Z2 <- pcs |> 
   filter(mode == 1) |>  
@@ -292,8 +359,9 @@ plot_ts <- mining_cmp |>
                          deltaPS_std = "δPS")) |> 
   ggplot(aes(x = as.Date(period), y = value, colour = series)) +
   geom_line() +
-  labs(x = "Period", y = "Standardised value", colour = "Series",
-       title = "PC2 vs δBS and δPS (standardised)") +
+  labs(x = "Time", y = "Standardised value", colour = "Series",
+       title = "PC2 vs δBS and δPS (standardised)", 
+       subtitle = "Comparison of the spreads against the PCA-derived PC2 factor") +
   theme_minimal()
 
 # Compare correlation 
@@ -313,7 +381,8 @@ plot_scatter <- ggplot(scatter_df, aes(x = pc_value, y = spread_value)) +
   geom_point(alpha = 0.5) +
   geom_smooth(method = "lm", se = FALSE) +
   facet_wrap(~ spread, scales = "free_y") +
-  labs(title = "PC2 vs spreads", x = "PC2", y = "Spread value") +
+  labs(title = "Comparing PC2 Reconstructions from City Spreads", 
+       subtitle = "Perth–Sydney spread (δPS) shows a closer alignment with PC2 than Brisbane–Sydney (δBS)", x = "PC2", y = "Spread value") +
   theme_minimal()
 
 plot_scatter 
@@ -345,8 +414,6 @@ ect   <- resid(cn_lm)
 adf_ect <- ur.df(ect, type = "none", selectlags = "AIC")
 summary(adf_ect)
 ```
-
-## Data Source and Limitaions (WIP)
 
 # Exploratory Analysis 
 
@@ -504,11 +571,9 @@ glance(fit_U) |> arrange(AICc)
 
 fit_U |> 
   select(arima211) |>
-  gg_tsresiduals()
-
-fit_U |> 
-  select(arima211) |>
-  gg_tsresiduals()
+  gg_tsresiduals() + 
+  ggtitle("Residual Diagnostics for ARIMA(2,1,1)",
+          subtitle = "Model fit on U series")
 ```
 
 Although both models fall short of strictly meeting the residual whiteness criterion, particularly since the degrees of freedom were not clearly defined in the test results, we use them here mainly for relative comparison of performance. Visual inspection of the residual plots suggests that the residuals are approximately normally distributed, with only a small share of autocorrelation coefficients exceeding the significance bounds in the ACF plot. As a general rule of thumb, if fewer than about 5% of the lags lie outside these bounds, the residuals can reasonably be treated as white noise.
@@ -632,7 +697,7 @@ decline_end <- yearmonth(decline_end)
 # Add in dummies for mining boom and decline periods
 train_PS <- train_PS |> 
   mutate(
-    boom    = as.integer(date >= boom_start    & date <= boom_end),
+    boom    = as.integer(date >= boom_start & date <= boom_end),
     decline = as.integer(date >= decline_start & date <= decline_end)
   )
 ```
@@ -647,7 +712,9 @@ fit_PS <- train_PS |>
 
 report(fit_PS)
 fit_PS |> 
-  gg_tsresiduals()
+  gg_tsresiduals() + 
+  ggtitle("Residual Diagnostics for ARIMA(2,0,1)",
+          subtitle = "Model fit on δPS series")
 ```
 
 ## Forecast Performance 
@@ -692,7 +759,9 @@ autoplot(fc_U, factor_trends_ts) +
             aes(x = date, y = hi80,
                 label = sprintf("w80 = %.4f", width80),
                 colour = .model),
-            vjust = -0.6, size = 2.5)
+            vjust = -0.6, size = 2.5) + 
+  labs(title = "Forecasts of National Trend U with 80% Prediction Interval",
+       subtitle = "The forecasts show a rising trend with wider prediction intervals")
 
 # Produce fan width for PS 
 fcbands_PS <- fc_PS  |> 
@@ -717,7 +786,9 @@ autoplot(fc_PS, factor_trends_ts) +
             aes(x = date, y = hi80,
                 label = sprintf("w80 = %.4f", width80),
                 colour = .model),
-            vjust = -0.6, size = 2.5)
+            vjust = -0.6, size = 2.5) + 
+  labs(title = "Forecasts of Mining Trend δPS with 80% Prediction Interval",
+       subtitle = "Excluding the boom/decline period produces more stable forecasts")
 ```
 
 The test set results show that the chosen model for U performs consistently with very low error (RMSE = 0.0076, negligible relative to the scale of U). For PS, the model incorporating boom/decline dummies produces out-of-sample forecasts that are on average about 7% off, which is acceptable given the series’ inherently difficult-to-predict behaviour (mining cycle is more volatile than the national market). While the ACF1 values indicate some remaining autocorrelation in the residuals, overall both models demonstrate solid performance.
@@ -739,9 +810,28 @@ acc_all <- bind_rows(acc_U, acc_PS) |>
   print()
 ```
 
-## Factor Model Application on Major City and SA4 Regions 
+```{r save-forecast-df}
+# Convert forecasts to tibble
+df_fc_U  <- as_tibble(fcbands_U)
+df_fc_PS <- as_tibble(fcbands_PS)
 
-### Goodness of Fit
+df_fc <- df_fc_U |>
+  select(date, mean_U = mean, lo80_U = lo80, hi80_U = hi80,
+         lo95_U = lo95, hi95_U = hi95) |>
+  left_join(
+    df_fc_PS |>
+      select(date, mean_PS = mean, lo80_PS = lo80, hi80_PS = hi80,
+         lo95_PS = lo95, hi95_PS = hi95),
+    by = "date"
+  )
+
+write_csv(df_fc, "data/df_forecasts.csv")
+```
+
+
+# Factor Model Application 
+
+## Goodness of Fit
 
 We now turn to evaluating how well the factor model captures the variation in individual major city and SA4 indexes. R² measures the share of variation in each major city or SA4 housing index that our factor model explains. 
 
@@ -844,9 +934,10 @@ ggplot(dist_comp, aes(x = r2, y = group)) +
                     alpha = 0.5) +
   ggdist::stat_pointinterval(.width = c(0.5, 0.8, 0.95), point_size = 1.8) +
   scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
-  labs(title = "R² distribution: SA4 vs major cities", x = "R²", y = NULL) +
+  labs(title = "Factor Model R² distribution: SA4 vs major cities", x = "R²", y = NULL) +
   theme_minimal(base_size = 12)
 ```
+
 The choropleth reinforces the findings from the summary table, as we can see that the east-coast capitals and coastal belts from Melbourne through Sydney into the South-East of Queensland show the strongest fit,  with most regional NSW/VIC also high. While fit weakens inland and to the west, notably across Western Australia and along Queensland’s mining belts; The dark purple areas mark the lowest R² and are typically remote and resource-exposed regions with possible boom–bust timing and sparse transactions that our three factors don’t fully capture.
 
 Hence, we’ll prioritise Western Australia and Queensland’s mining-exposed regions for residual diagnostics, where we expect autocorrelation and regime shifts for trial enhancements. 
@@ -922,11 +1013,11 @@ ggplot() +
   size = 1.5, label.padding = unit(0.05, "lines"), label.r = unit(0.05, "lines"),    
   label.size = 0.15, box.padding = 0.2, seed = 42) +
   coord_sf() +
-  labs(title = "Factor model R² distribution across cities & regions") +
+  labs(title = "Factor Model R² Distribution across Cities & Regions") +
   theme_void(base_size = 12)
 ```
 
-### Residual Autocorrelation
+## Residual Autocorrelation
 
 At this stage, the model does not incorporate any time dynamics in the residuals. While it explains a substantial share of the variance for both cities and regions, the trending and autocorrelated nature of housing indexes means that the residuals themselves display extremely strong positive autocorrelation. This is evident in the Durbin–Watson statistics, which are close to zero across all regions: Major cities cluster around 0.02 to 0.05, while SA4 regions have a slightly broader range, extending up to 0.2, but still remain far below the benchmark value of 2. This pattern underscores the limitations of using a static regression framework without accounting for time-series dynamics.
 
@@ -973,7 +1064,8 @@ ggplot(reg_coef_long, aes(x = coef, fill = factor)) +
   theme_minimal() +
   theme(legend.position = "none") +
   labs(x = "Coefficient", y = "Density",
-       title = "Coefficient distributions")
+       title = "Distribution of Estimated Coefficient", 
+       subtitle = "Market coefficients are tightly clustered around 1.0, while mining coefficients show greater dispersion")
 
 # Pairwise
 cols <- c("market","mining")
@@ -982,15 +1074,45 @@ ggpairs(
   columns = match(cols, names(reg_coefs)),
   mapping = aes(colour = region_level),
   upper = list(continuous = wrap("cor", size = 3)),
-  lower = list(continuous = wrap("smooth_loess", alpha = 0.6, size = 0.6)),
+  lower = list(continuous = wrap("smooth_loess", alpha = 0.6, size = 0.3)),
   diag  = list(continuous = wrap("densityDiag", alpha = 0.6))
-) 
+) + 
+  labs(title = "Relationship Between Market and Mining Coefficients",
+       subtitle = "Regions more sensitive to the national housing trend generally show lower sensitivity to mining dynamics") 
 ```
 
+# Model Improvement with Time-dependent Coefficients 
 
+Forecasts for each major city and SA4 region are obtained by combining the projected factor trends with the static coefficients from the factor model. Specifically, the estimated loadings are applied to the forecasted values of U and PS to produce region-specific housing price index projections.
 
-# Improve Model by Time-dependent Coefficients 
+As the coefficients are fixed, the projected indexes evolve in parallel with the factor trends, scaled by their respective loadings, as illustrated in the accompanying figure. To capture greater regional heterogeneity, the subsequent stage of the analysis will extend the model to incorporate time-varying coefficients.
 
+```{r forecast-coef}
+reg_coefs1 <- reg_coefs |> select(region_level, region, alpha, market, mining)
+
+regional_forecasts <- df_fc |>
+  crossing(reg_coefs1) |> 
+  mutate(
+    mu_fct = alpha + market * mean_U + mining * mean_PS,
+    lo80 = alpha + market * lo80_U + mining * lo80_PS,
+    hi80 = alpha + market * hi80_U + mining * hi80_PS,
+    lo95 = alpha + market * lo95_U + mining * lo95_PS,
+    hi95 = alpha + market * hi95_U + mining * hi95_PS
+  ) |>
+  select(date, region_level, region, mu_fct, lo80, hi80, lo95, hi95)
+
+# Plot major city forecasted indexes 
+major_city_fc <- regional_forecasts |>
+  filter(region_level == "major_city")
+
+ggplot(major_city_fc, aes(x = date, y = mu_fct, colour = region, fill = region)) +
+  geom_line(size = 0.5) +
+  labs(title = "Forecasted Housing Indexes for Major Cities",
+       subtitle = "Trend differences between cities driven by their factor coefficient",
+       x = "Date", y = "Forecasted Index",
+       colour = "City", fill = "City") +
+  theme_minimal(base_size = 10) 
+```
 
 # Boundedness Test on the Factor Trends (WIP)
 
