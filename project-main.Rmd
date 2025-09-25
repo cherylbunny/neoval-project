@@ -42,6 +42,8 @@ library(readxl)
 library(GGally)
 library(zoo)
 library(strucchange)
+library(slider)
+library(glmnet)
 #library(plotly)
 ```
 
@@ -253,7 +255,7 @@ lifestyle_cmp |>
        title = "Reconstructing PC3 Using SA4 Region Combinations") +
   theme_minimal()
 
-corr_lifestyle <- cor(lifestyle_cmp$pc_value, lifestyle_cmp$lifestyle_proxy, use = "complete.obs")
+corr_lifestyle <- cor(lifestyle_cmp$pc_value, lifestyle_cmp$lifestyle_proxy, use = "complete.obs") |> print()
 ```
 
 # Introduction 
@@ -697,7 +699,7 @@ decline_end <- yearmonth(decline_end)
 # Add in dummies for mining boom and decline periods
 train_PS <- train_PS |> 
   mutate(
-    boom    = as.integer(date >= boom_start & date <= boom_end),
+    boom = as.integer(date >= boom_start & date <= boom_end),
     decline = as.integer(date >= decline_start & date <= decline_end)
   )
 ```
@@ -1081,6 +1083,61 @@ ggpairs(
        subtitle = "Regions more sensitive to the national housing trend generally show lower sensitivity to mining dynamics") 
 ```
 
+**WIP - Notes**: Before complicating with rolling betas, we are examining if ARIMAX can soak up the persistence. If residual autocorrelation disappears after ARIMAX, then maybe static coefficients are fine. 
+
+```{r arima-x-wip}
+sa4_indexes_long <- sa4_indexes |>
+  pivot_longer(
+    cols = -month_date,        
+    names_to = "region",    
+    values_to = "value"        
+  )
+
+# Define variables 
+x_df <- factor_trends |> select(month_date, market, mining_ps, lifestyle)
+
+df_all <- sa4_indexes_long |>
+  inner_join(x_df, by = "month_date") |>
+  arrange(region, month_date) |>
+  drop_na()
+
+# Fit - without constant 
+results_no_const <- df_all |>
+  group_by(region) |>
+  group_map(~{
+    dates <- .x$month_date
+    y     <- .x$value
+    x     <- as.matrix(.x[, c("market","mining_ps","lifestyle")])
+    y_ts  <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
+    # Fit ARIMA(1,1,0) with xreg
+    fit   <- Arima(y_ts, order = c(1,1,0), xreg = x, include.mean = FALSE, include.drift = FALSE) # No intercept or drift
+    resid <- residuals(fit)
+    lb <- Box.test(resid, lag = 24, type = "Ljung-Box", fitdf = length(coef(fit)))
+    # Return a tibble of diagnostics 
+    tibble(region = .x$region[1],
+           actual = y,
+           y_hat  = as.numeric(fitted(fit)),
+           aic = AIC(fit),
+           lb_p = lb$p.value)
+  }) |> bind_rows()
+# manual try: 010 0.3863636, 110 0.6931818, 011 0.6704545, 111 0.6818182
+
+#results 
+results_no_const |>
+  summarise(
+    pass = mean(lb_p > 0.05, na.rm = TRUE),
+    mean_AIC = mean(aic, na.rm = TRUE)
+  )
+
+ggplot(results_no_const, aes(lb_p)) +
+  geom_histogram(bins = 20) +
+  geom_vline(xintercept = 0.05, linetype = "dashed") +
+  labs(title = "Residual Ljung–Box p-values across regions (ARIMAX(1,1,0))",
+       x = "p-value", y = "Count",
+       subtitle = "Proportion with p > 0.05: 69.3%") +
+  theme_minimal()
+```
+
 # Model Improvement with Time-dependent Coefficients 
 
 Forecasts for each major city and SA4 region are obtained by combining the projected factor trends with the static coefficients from the factor model. Specifically, the estimated loadings are applied to the forecasted values of U and PS to produce region-specific housing price index projections.
@@ -1113,6 +1170,62 @@ ggplot(major_city_fc, aes(x = date, y = mu_fct, colour = region, fill = region))
        colour = "City", fill = "City") +
   theme_minimal(base_size = 10) 
 ```
+
+```{r ols-coef-wip, eval = FALSE}
+panel <- sa4_indexes_long |>
+  inner_join(factor_trends, by = "month_date") |> 
+  select(-mining) |> 
+  mutate(across(c(market, mining_ps, lifestyle), scale)) |> 
+  arrange(region, month_date)
+
+formula_y <- y ~ market + mining_ps
+
+# Window setting  
+win <- 120
+predictors <- c("market","mining_ps") 
+lambda <- 0.1  
+
+empty_coef <- function() {
+  tibble(alpha = NA_real_) |>
+    bind_cols(as_tibble(setNames(
+      as.list(rep(NA_real_, length(predictors))), predictors)))
+}
+
+# Time changing 
+coefs_ridge_roll <- panel |>
+  group_by(region) |>
+  arrange(month_date, .by_group = TRUE) |>
+  mutate(.fits = slide_index(
+    .x = pick(all_of(c("y", predictors))),
+    .i = month_date,
+    .before = win - 1,
+    .complete = TRUE,
+    .f = ~ {
+      if (nrow(.x) < length(predictors) + 2) return(empty_coef())
+      X <- as.matrix(.x[, predictors, drop = FALSE])
+      yv <- .x$y
+      fit <- glmnet(X, yv, alpha = 0, lambda = lambda,
+                    intercept = TRUE, standardize = FALSE,
+                    family = "gaussian")
+      b <- as.numeric(coef(fit))       
+      tibble(alpha = b[1], !!!setNames(as.list(b[-1]), predictors))
+    }
+  )) |>
+  ungroup() |>
+  select(region, month_date, .fits) |>
+  unnest(.fits)
+
+coefs_tv |>
+  filter(region == "PERTH - INNER") |>
+  ggplot(aes(x = month_date)) +
+  geom_line(aes(y = market, colour = "Market")) +
+  geom_line(aes(y = mining_ps, colour = "Mining")) +
+  labs(title = "Rolling coefficients for Inner Perth",
+       y = "Coefficient", x = "Date",
+       colour = "Factor") +
+  theme_minimal(base_size = 13)
+```
+
 
 # Boundedness Test on the Factor Trends (WIP)
 
