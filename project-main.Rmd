@@ -1027,10 +1027,10 @@ At this stage, the model does not incorporate any time dynamics in the residuals
 reg_coefs |>
   group_by(region_level) |> 
   summarise(
-    dw_min   = min(durbin_watson),
-    dw_max   = max(durbin_watson),
-    dw_mean  = mean(durbin_watson),
-    dw_median= median(durbin_watson), 
+    dw_min = min(durbin_watson),
+    dw_max = max(durbin_watson),
+    dw_mean = mean(durbin_watson),
+    dw_median = median(durbin_watson), 
     range = max(durbin_watson) - min(durbin_watson)
   )
 
@@ -1083,15 +1083,14 @@ ggpairs(
        subtitle = "Regions more sensitive to the national housing trend generally show lower sensitivity to mining dynamics") 
 ```
 
-**WIP - Notes**: Before complicating with rolling betas, we are examining if ARIMAX can soak up the persistence. If residual autocorrelation disappears after ARIMAX, then maybe static coefficients are fine. 
+We tested ARIMAX to check if it could remove residual autocorrelation, which would indicate that static coefficients are adequate. 
+ARIMAX keeps the regression coefficients fixed while applying an ARIMA model to the residuals. We initially fitted baseline ARIMA models (110, 011, 010, 111) and selected the best specification by balancing AICc values with the Ljung–Box test p-values, which indicate whether the residuals resemble white noise. 
 
-```{r arima-x-wip}
+The ARIMA(1,1,0) model performed best, with 69.3% of SA4 regions showing residuals with p-values above 5%. For the remaining regions that failed the test, we applied two refinements: a seasonal model with seasonal (1,0,0) for regions with strong seasonality, and an AR(2) model for those with short-lag autocorrelation. These adjustments improved the overall pass rate to 86.4%.
+
+```{r reg-arimax}
 sa4_indexes_long <- sa4_indexes |>
-  pivot_longer(
-    cols = -month_date,        
-    names_to = "region",    
-    values_to = "value"        
-  )
+  pivot_longer(cols = -month_date, names_to = "region", values_to = "value")
 
 # Define variables 
 x_df <- factor_trends |> select(month_date, market, mining_ps, lifestyle)
@@ -1101,46 +1100,114 @@ df_all <- sa4_indexes_long |>
   arrange(region, month_date) |>
   drop_na()
 
-# Fit - without constant 
-results_no_const <- df_all |>
+# Baseline fit 
+fit_xreg <- df_all |>
   group_by(region) |>
   group_map(~{
     dates <- .x$month_date
-    y     <- .x$value
-    x     <- as.matrix(.x[, c("market","mining_ps","lifestyle")])
-    y_ts  <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
-    # Fit ARIMA(1,1,0) with xreg
-    fit   <- Arima(y_ts, order = c(1,1,0), xreg = x, include.mean = FALSE, include.drift = FALSE) # No intercept or drift
+    y <- .x$value
+    reg <- .y$region[[1]]  
+    x <- as.matrix(.x[, c("market","mining_ps","lifestyle")])
+    y_ts <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
+    fit <- Arima(y_ts, order = c(1, 1,0), xreg = x, include.mean = FALSE, include.drift = FALSE) 
     resid <- residuals(fit)
     lb <- Box.test(resid, lag = 24, type = "Ljung-Box", fitdf = length(coef(fit)))
-    # Return a tibble of diagnostics 
-    tibble(region = .x$region[1],
+    tibble(region = reg,
            actual = y,
-           y_hat  = as.numeric(fitted(fit)),
+           y_hat = as.numeric(fitted(fit)),
+           model = list(fit),
+           resid = list(resid),
            aic = AIC(fit),
-           lb_p = lb$p.value)
-  }) |> bind_rows()
-# manual try: 010 0.3863636, 110 0.6931818, 011 0.6704545, 111 0.6818182
+           lb_p = lb$p.value) }) |> 
+  bind_rows()
 
-#results 
-results_no_const |>
+# Results for baseline fit 
+fit_xreg |>
   summarise(
     pass = mean(lb_p > 0.05, na.rm = TRUE),
-    mean_AIC = mean(aic, na.rm = TRUE)
-  )
+    mean_AIC = mean(aic, na.rm = TRUE))
 
-ggplot(results_no_const, aes(lb_p)) +
-  geom_histogram(bins = 20) +
-  geom_vline(xintercept = 0.05, linetype = "dashed") +
-  labs(title = "Residual Ljung–Box p-values across regions (ARIMAX(1,1,0))",
-       x = "p-value", y = "Count",
-       subtitle = "Proportion with p > 0.05: 69.3%") +
-  theme_minimal()
+# Regions for finer fit 
+region_not_fit <- fit_xreg |> 
+  filter(lb_p < 0.05) |> 
+  select(region)|> 
+  unique() |>
+  pull(region)
+
+short_lag_regions <- c("BAROSSA - YORKE - MID NORTH","BENDIGO","BRISBANE - SOUTH","CAPITAL REGION","GEELONG","LAUNCESTON AND NORTH EAST","MACKAY - ISAAC - WHITSUNDAY","MELBOURNE - NORTH WEST","MORETON BAY - NORTH","NEWCASTLE AND LAKE MACQUARIE")
+
+seasonal_regions <- c("BALLARAT","BUNBURY","CENTRAL WEST","DARWIN","HOBART", "ILLAWARRA","IPSWICH","MELBOURNE - SOUTH EAST","PERTH - NORTH WEST","PERTH - SOUTH WEST","SOUTH EAST","SYDNEY - BAULKHAM HILLS AND HAWKESBURY","SYDNEY - INNER SOUTH WEST","SYDNEY - OUTER WEST AND BLUE MOUNTAINS","WESTERN AUSTRALIA - OUTBACK (NORTH)","WIDE BAY")
+
+# Finer fit - two models 
+fit_xreg_seasonal <- df_all |>
+  filter(region %in% seasonal_regions) |>
+  group_by(region) |>
+  group_map(~{
+    dates <- .x$month_date
+    y <- .x$value
+    reg <- .y$region[[1]]
+    x <- as.matrix(.x[, c("market","mining_ps","lifestyle")])
+    y_ts <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
+    fit <- Arima(y_ts, order = c(1,1,0), seasonal = list(order = c(1,0,0), period = 12),xreg = x, include.mean = FALSE, include.drift = FALSE)
+    resid <- residuals(fit)
+    lb <- Box.test(resid, lag = 24, type = "Ljung-Box", fitdf = length(coef(fit)))
+    tibble(
+      region = reg,
+      spec_label = "seasonal (1,1,0)(1,0,0)[12]",
+      model = list(fit),
+      resid = list(resid),
+      aic = AIC(fit),
+      lb_p = lb$p.value
+    )
+  }) |>
+  bind_rows()
+
+fit_xreg_short <- df_all |>
+  filter(region %in% short_lag_regions) |>
+  group_by(region) |>
+  group_map(~{
+    dates <- .x$month_date
+    y <- .x$value
+    reg <- .y$region[[1]]
+    x <- as.matrix(.x[, c("market","mining_ps","lifestyle")])
+    y_ts <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
+    fit <- Arima(y_ts, order = c(2,1,0), xreg = x, include.mean = FALSE, include.drift = FALSE) 
+    resid <- residuals(fit)
+    lb <- Box.test(resid, lag = 24, type = "Ljung-Box", fitdf = length(coef(fit)))
+    tibble(
+      region = reg,
+      spec_label = "short lag (2,1,0)",
+      model = list(fit),
+      resid = list(resid),
+      aic = AIC(fit),
+      lb_p = lb$p.value)}) |>
+  bind_rows()
+
+fit_xreg_seasonal|>
+  summarise(
+    pass = mean(lb_p > 0.05, na.rm = TRUE),
+    mean_AIC = mean(aic, na.rm = TRUE))
+
+fit_xreg_short|>
+  summarise(
+    pass = mean(lb_p > 0.05, na.rm = TRUE),
+    mean_AIC = mean(aic, na.rm = TRUE))
+
+
+# This is the code for the PCF, PACF plots for the regions with p under 0.05 
+# for (r in region_not_fit ) {
+#  resid_list <- fit_xreg |> filter(region == r) |> pull(resid)
+ # if (length(resid_list) == 0) next
+#  resid_vals <- resid_list[[1]]
+
+ # p1 <- ggAcf(resid_vals)  + ggtitle(paste("Residual ACF -", r))
+#  p2 <- ggPacf(resid_vals) + ggtitle(paste("Residual PACF -", r))
+#  gridExtra::grid.arrange(p1, p2, ncol = 2)}
 ```
 
 # Model Improvement with Time-dependent Coefficients 
 
-Forecasts for each major city and SA4 region are obtained by combining the projected factor trends with the static coefficients from the factor model. Specifically, the estimated loadings are applied to the forecasted values of U and PS to produce region-specific housing price index projections.
+Forecasts for each major city and SA4 region are obtained by combining the projected factor trends with the static coefficients from the factor model. Specifically, the estimated loadings are applied to the forecasted values of factors to produce region-specific housing price index projections.
 
 As the coefficients are fixed, the projected indexes evolve in parallel with the factor trends, scaled by their respective loadings, as illustrated in the accompanying figure. To capture greater regional heterogeneity, the subsequent stage of the analysis will extend the model to incorporate time-varying coefficients.
 
@@ -1171,62 +1238,116 @@ ggplot(major_city_fc, aes(x = date, y = mu_fct, colour = region, fill = region))
   theme_minimal(base_size = 10) 
 ```
 
-```{r ols-coef-wip, eval = FALSE}
+## Rolling Ridge Regression 
+
+Rolling ridge regression is employed as small and noisy samples (particularly with volatile factors such as mining and lifestyle, can lead to instability in OLS-based rolling coefficient estimates) which adds a penalty term (λ) to the loss function to shrink coefficient estimates towards zero. This regularization helps reduce variance and improve out-of-sample performance, especially when predictors are correlated or the sample size is limited.
+
+We set a 60-month window to captures regime shifts faster and used grid search to identify the global λ that minimises out-of-sample RMSE across all regions. This λ is then applied in a rolling regression framework to estimate time-varying regional coefficients. The optimal λ, 0.0001, indicates a light penalty that nonetheless helps stabilise the estimates.
+
+After that we fit rolling ridge regressions for each region using the chosen λ. The resulting time-varying coefficients capture evolving regional sensitivities to the national, mining and lifestyle trends, allowing for more nuanced forecasts that reflect changing market dynamics.
+
+```{r ols-lambda, eval = FALSE}
+# Set up panel 
 panel <- sa4_indexes_long |>
   inner_join(factor_trends, by = "month_date") |> 
   select(-mining) |> 
-  mutate(across(c(market, mining_ps, lifestyle), scale)) |> 
+  mutate(across(c(market, mining_ps, lifestyle),  ~ as.numeric(scale(.)))) |> # Scale predictors 
   arrange(region, month_date)
 
-formula_y <- y ~ market + mining_ps
-
-# Window setting  
-win <- 120
-predictors <- c("market","mining_ps") 
-lambda <- 0.1  
-
-empty_coef <- function() {
+# Function for empty coef when window is too short
+empty_coef <- function(predictors) {
   tibble(alpha = NA_real_) |>
-    bind_cols(as_tibble(setNames(
-      as.list(rep(NA_real_, length(predictors))), predictors)))
+    bind_cols(as_tibble(setNames(as.list(rep(NA_real_, length(predictors))), predictors)))
 }
 
-# Time changing 
-coefs_ridge_roll <- panel |>
-  group_by(region) |>
-  arrange(month_date, .by_group = TRUE) |>
-  mutate(.fits = slide_index(
-    .x = pick(all_of(c("y", predictors))),
-    .i = month_date,
-    .before = win - 1,
-    .complete = TRUE,
-    .f = ~ {
-      if (nrow(.x) < length(predictors) + 2) return(empty_coef())
-      X <- as.matrix(.x[, predictors, drop = FALSE])
-      yv <- .x$y
-      fit <- glmnet(X, yv, alpha = 0, lambda = lambda,
-                    intercept = TRUE, standardize = FALSE,
-                    family = "gaussian")
-      b <- as.numeric(coef(fit))       
-      tibble(alpha = b[1], !!!setNames(as.list(b[-1]), predictors))
-    }
-  )) |>
-  ungroup() |>
-  select(region, month_date, .fits) |>
-  unnest(.fits)
+# Config set up with grid search for lambda 
+target <- "value"
+predictors <- c("market","mining_ps","lifestyle")
+win <- 60 
+lambda_grid <- exp(seq(log(1e-4), log(1), length.out = 20)) # A grid of 20 even spaced values from 0.0001 to 1 
 
-coefs_tv |>
-  filter(region == "PERTH - INNER") |>
-  ggplot(aes(x = month_date)) +
-  geom_line(aes(y = market, colour = "Market")) +
-  geom_line(aes(y = mining_ps, colour = "Mining")) +
-  labs(title = "Rolling coefficients for Inner Perth",
-       y = "Coefficient", x = "Date",
-       colour = "Factor") +
-  theme_minimal(base_size = 13)
+# Function to fit on first test window of rows, produce one coef 
+ridge_predict_one <- function(train_df, test_row, predictors, target, lambda) {
+  Xtr <- as.matrix(train_df[, predictors, drop = FALSE])
+  ytr <- train_df[[target]]
+  fit <- glmnet(x = Xtr, y = ytr, alpha = 0, lambda = lambda,
+                intercept = TRUE, standardize = FALSE, family = "gaussian")
+  x_te <- c(1, as.numeric(test_row[, predictors, drop = FALSE]))
+  as.numeric(x_te %*% as.matrix(coef(fit)))
+}
+
+# Find the best global lambda 
+rmse_by_lambda_global <- function(panel, predictors, target, win, lambda_grid) {
+  
+  errs_list <- panel |> 
+    group_by(region) |> 
+    group_map(~{
+      df <- drop_na(.x, all_of(c(target, predictors))) #Drop NA is any, safe guard 
+      n  <- nrow(df) 
+      if (n < win) return(NULL) # Drop if not enough rows, safe guard 
+      ends <- seq(win, n)
+      
+      map(lambda_grid, function(lam) { # Mapping the lambda grid
+        se <- map_dbl(ends, function(i) { # Collect a single SSE per window per region 
+          tr_idx <- (i - win + 1):(i - 1)  # Training 
+          te_idx <- i   # Testing 
+          if (length(tr_idx) < length(predictors) + 2) return(NA_real_) # Training set should be larger than num of predictors + 2
+          yhat <- ridge_predict_one(df[tr_idx, , drop = FALSE], # Fit on training rows 
+                                    df[te_idx, , drop = FALSE], # Predict on test row 
+                                    predictors, target, lambda = lam) # Pass predictor name, outcome name and lambda
+          (df[[target]][te_idx] - yhat)^2
+          }) # Compute the squared error
+        se
+        }) |> 
+        set_names(paste0("lam_", seq_along(lambda_grid))) |>as_tibble() # list of SE vectors
+    })
+  
+  err_mat <- bind_rows(errs_list)
+  rmse <- err_mat |> 
+    summarise(across(everything(), ~ sqrt(mean(.x, na.rm = TRUE)))) |> # Compute RMSE
+    pivot_longer(everything(), names_to = "lam_id", values_to = "rmse") |> 
+    mutate(lambda = lambda_grid[as.integer(gsub("lam_", "", lam_id))]) |> 
+    arrange(rmse) |> 
+    select(lambda, rmse)
+  rmse
+}
+
+# Lambda value by rmse, pick the first one with lowest RMSE 
+rmse_table <- rmse_by_lambda_global(panel, predictors, target, win, lambda_grid)
+lambda_best <- rmse_table$lambda[1]
 ```
 
+```{r ols-roll}
+# Fit the rolling OLS 
+coefs_ridge_roll <- panel |> 
+  group_by(region) |> 
+  arrange(month_date, .by_group = TRUE) |> 
+  mutate(
+    .fits = slide_index( 
+      .x = pick(all_of(c(target, predictors))),
+      .i  = month_date,
+      .before = win - 1,
+      .complete = TRUE, # Only produce results when a full window exists
+      .f = ~ {
+        dfw <- drop_na(.x) # Remove any rows with missing values in target or predictors
+        if (nrow(dfw) < length(predictors) + 2 || is.na(lambda_best)) {
+          return(empty_coef(predictors))
+        }
+        X  <- as.matrix(dfw[, predictors, drop = FALSE]) # Predictor matrix
+        yv <- dfw[[target]]
+        fit <- glmnet(x = X, y = yv, alpha = 0, lambda = lambda_best, intercept = TRUE,
+                      standardize = FALSE, family = "gaussian") # Fit ridge regression with chosen lambda 
+        b <- as.numeric(coef(fit))
+        tibble(alpha = b[1], !!!setNames(as.list(b[-1]), predictors))
+      }
+    )
+  ) |> 
+  ungroup() |> 
+  select(region, month_date, .fits) |> 
+  unnest(.fits)
+```
 
+---Progress here--- 
 # Boundedness Test on the Factor Trends (WIP)
 
 (WIP - examine numbers since we switched to PS; Add more methodologies with the forecast model should be built at this stage)
