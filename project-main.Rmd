@@ -1121,12 +1121,6 @@ fit_xreg <- df_all |>
            lb_p = lb$p.value) }) |> 
   bind_rows()
 
-# Results for baseline fit 
-fit_xreg |>
-  summarise(
-    pass = mean(lb_p > 0.05, na.rm = TRUE),
-    mean_AIC = mean(aic, na.rm = TRUE))
-
 # Regions for finer fit 
 region_not_fit <- fit_xreg |> 
   filter(lb_p < 0.05) |> 
@@ -1183,15 +1177,25 @@ fit_xreg_short <- df_all |>
       lb_p = lb$p.value)}) |>
   bind_rows()
 
-fit_xreg_seasonal|>
-  summarise(
-    pass = mean(lb_p > 0.05, na.rm = TRUE),
-    mean_AIC = mean(aic, na.rm = TRUE))
+# Binding model testing outcomes
+results_arimax <- bind_rows(
+  fit_xreg |> 
+    summarise(pass = mean(lb_p > 0.05, na.rm = TRUE),
+              mean_AIC = mean(aic, na.rm = TRUE)) |> 
+    mutate(model = "Baseline ARIMA(1,1,0)"),
+  
+  fit_xreg_short |> 
+    summarise(pass = mean(lb_p > 0.05, na.rm = TRUE),
+              mean_AIC = mean(aic, na.rm = TRUE)) |> 
+    mutate(model = "Short lag ARIMA(2,1,0)"),
+  
+  fit_xreg_seasonal |> 
+    summarise(pass = mean(lb_p > 0.05, na.rm = TRUE),
+              mean_AIC = mean(aic, na.rm = TRUE)) |> 
+    mutate(model = "Seasonal ARIMA(1,1,0)(1,0,0)[12]")
+)
 
-fit_xreg_short|>
-  summarise(
-    pass = mean(lb_p > 0.05, na.rm = TRUE),
-    mean_AIC = mean(aic, na.rm = TRUE))
+kable(results_arimax, caption = "Model Diagnostics: p-values and AICc across ARIMA Variants")
 
 
 # This is the code for the PCF, PACF plots for the regions with p under 0.05 
@@ -1238,114 +1242,118 @@ ggplot(major_city_fc, aes(x = date, y = mu_fct, colour = region, fill = region))
   theme_minimal(base_size = 10) 
 ```
 
-## Rolling Ridge Regression 
+## Rolling Ridge Regression
 
 Rolling ridge regression is employed as small and noisy samples (particularly with volatile factors such as mining and lifestyle, can lead to instability in OLS-based rolling coefficient estimates) which adds a penalty term (λ) to the loss function to shrink coefficient estimates towards zero. This regularization helps reduce variance and improve out-of-sample performance, especially when predictors are correlated or the sample size is limited.
 
-We set a 60-month window to captures regime shifts faster and used grid search to identify the global λ that minimises out-of-sample RMSE across all regions. This λ is then applied in a rolling regression framework to estimate time-varying regional coefficients. The optimal λ, 0.0001, indicates a light penalty that nonetheless helps stabilise the estimates.
+We set a 60-month window to captures regime shifts faster and used grid search to identify the global λ that minimises out-of-sample RMSE across all regions. This λ is then applied in a rolling regression framework to estimate time-varying regional coefficients. The optimal λ, 0.0475, indicates a light penalty that nonetheless helps stabilise the estimates. After that we fit rolling ridge regressions for each region using the chosen λ. The resulting time-varying coefficients capture evolving regional sensitivities to the national, mining and lifestyle trends. 
 
-After that we fit rolling ridge regressions for each region using the chosen λ. The resulting time-varying coefficients capture evolving regional sensitivities to the national, mining and lifestyle trends, allowing for more nuanced forecasts that reflect changing market dynamics.
+We apply a rolling regression using a fixed 5-year window. For each region, the data are split into overlapping windows of equal length, each shifted forward by one month. Within each window we fit a penalised linear regression to estimate the intercept and factor coefficients. The resulting coefficients are recorded at the end of the window, then the window is advanced and the process repeats. This produces a time-series of coefficients for every region showing how the influence of the underlying factors evolves gradually over time.
 
-```{r ols-lambda, eval = FALSE}
+```{r ols-lambda}
+# Config set up with grid search for lambda 
+target <- "value"
+predictors <- c("market","mining_ps","lifestyle")
+win <- 60 
+lambda_grid <- exp(seq(log(1e-4), log(1), length.out = 20))
+
 # Set up panel 
 panel <- sa4_indexes_long |>
   inner_join(factor_trends, by = "month_date") |> 
   select(-mining) |> 
   mutate(across(c(market, mining_ps, lifestyle),  ~ as.numeric(scale(.)))) |> # Scale predictors 
-  arrange(region, month_date)
+  arrange(region, month_date) |> 
+  drop_na(all_of(c(target, predictors)))
 
-# Function for empty coef when window is too short
-empty_coef <- function(predictors) {
-  tibble(alpha = NA_real_) |>
-    bind_cols(as_tibble(setNames(as.list(rep(NA_real_, length(predictors))), predictors)))
-}
+# Pull everything together in a matrix 
+X_all <- as.matrix(panel[, predictors, drop = FALSE])
+y_all <- panel[[target]]
 
-# Config set up with grid search for lambda 
-target <- "value"
-predictors <- c("market","mining_ps","lifestyle")
-win <- 60 
-lambda_grid <- exp(seq(log(1e-4), log(1), length.out = 20)) # A grid of 20 even spaced values from 0.0001 to 1 
+# Cross-validation to choose lambda
+cvfit <- cv.glmnet(x = X_all, y = y_all, alpha = 0, family = "gaussian", intercept = TRUE, standardize = TRUE, nfolds = 5)
 
-# Function to fit on first test window of rows, produce one coef 
-ridge_predict_one <- function(train_df, test_row, predictors, target, lambda) {
-  Xtr <- as.matrix(train_df[, predictors, drop = FALSE])
-  ytr <- train_df[[target]]
-  fit <- glmnet(x = Xtr, y = ytr, alpha = 0, lambda = lambda,
-                intercept = TRUE, standardize = FALSE, family = "gaussian")
-  x_te <- c(1, as.numeric(test_row[, predictors, drop = FALSE]))
-  as.numeric(x_te %*% as.matrix(coef(fit)))
-}
+lambda_best <- cvfit$lambda.min
 
-# Find the best global lambda 
-rmse_by_lambda_global <- function(panel, predictors, target, win, lambda_grid) {
-  
-  errs_list <- panel |> 
-    group_by(region) |> 
-    group_map(~{
-      df <- drop_na(.x, all_of(c(target, predictors))) #Drop NA is any, safe guard 
-      n  <- nrow(df) 
-      if (n < win) return(NULL) # Drop if not enough rows, safe guard 
-      ends <- seq(win, n)
-      
-      map(lambda_grid, function(lam) { # Mapping the lambda grid
-        se <- map_dbl(ends, function(i) { # Collect a single SSE per window per region 
-          tr_idx <- (i - win + 1):(i - 1)  # Training 
-          te_idx <- i   # Testing 
-          if (length(tr_idx) < length(predictors) + 2) return(NA_real_) # Training set should be larger than num of predictors + 2
-          yhat <- ridge_predict_one(df[tr_idx, , drop = FALSE], # Fit on training rows 
-                                    df[te_idx, , drop = FALSE], # Predict on test row 
-                                    predictors, target, lambda = lam) # Pass predictor name, outcome name and lambda
-          (df[[target]][te_idx] - yhat)^2
-          }) # Compute the squared error
-        se
-        }) |> 
-        set_names(paste0("lam_", seq_along(lambda_grid))) |>as_tibble() # list of SE vectors
-    })
-  
-  err_mat <- bind_rows(errs_list)
-  rmse <- err_mat |> 
-    summarise(across(everything(), ~ sqrt(mean(.x, na.rm = TRUE)))) |> # Compute RMSE
-    pivot_longer(everything(), names_to = "lam_id", values_to = "rmse") |> 
-    mutate(lambda = lambda_grid[as.integer(gsub("lam_", "", lam_id))]) |> 
-    arrange(rmse) |> 
-    select(lambda, rmse)
-  rmse
-}
-
-# Lambda value by rmse, pick the first one with lowest RMSE 
-rmse_table <- rmse_by_lambda_global(panel, predictors, target, win, lambda_grid)
-lambda_best <- rmse_table$lambda[1]
-```
-
-```{r ols-roll}
 # Fit the rolling OLS 
-coefs_ridge_roll <- panel |> 
-  group_by(region) |> 
-  arrange(month_date, .by_group = TRUE) |> 
-  mutate(
-    .fits = slide_index( 
-      .x = pick(all_of(c(target, predictors))),
-      .i  = month_date,
-      .before = win - 1,
-      .complete = TRUE, # Only produce results when a full window exists
-      .f = ~ {
-        dfw <- drop_na(.x) # Remove any rows with missing values in target or predictors
-        if (nrow(dfw) < length(predictors) + 2 || is.na(lambda_best)) {
-          return(empty_coef(predictors))
-        }
-        X  <- as.matrix(dfw[, predictors, drop = FALSE]) # Predictor matrix
-        yv <- dfw[[target]]
-        fit <- glmnet(x = X, y = yv, alpha = 0, lambda = lambda_best, intercept = TRUE,
-                      standardize = FALSE, family = "gaussian") # Fit ridge regression with chosen lambda 
-        b <- as.numeric(coef(fit))
-        tibble(alpha = b[1], !!!setNames(as.list(b[-1]), predictors))
-      }
+regions <- unique(panel$region)
+
+# List and index for storing results
+all_rows <- list()
+row_counter <- 1L
+
+# Main function 
+for (r in regions) {
+  df_r <- panel[panel$region == r, , drop = FALSE]
+  n_r <- nrow(df_r)
+
+  for (i in seq.int(win, n_r)) {
+    rows_win <- seq.int(i - win + 1L, i)
+    dfw <- df_r[rows_win, , drop = FALSE]
+    if (anyNA(dfw[, c(target, predictors), drop = FALSE])) next
+
+    X <- as.matrix(dfw[, predictors, drop = FALSE])
+    y <- dfw[[target]]
+    
+    # Fit ridge regression 
+    fit <- glmnet(
+      x = X, y = y,
+      alpha = 0, lambda = lambda_best,
+      intercept = TRUE, standardize = FALSE,
+      family = "gaussian"
     )
-  ) |> 
-  ungroup() |> 
-  select(region, month_date, .fits) |> 
-  unnest(.fits)
+
+    C <- as.matrix(coef(fit))
+    a0 <- as.numeric(C["(Intercept)", 1])
+    betas <- numeric(length(predictors))
+    names(betas) <- predictors
+    
+    for (p in predictors) {
+      betas[p] <- if (p %in% rownames(C)) as.numeric(C[p, 1]) else 0
+    }
+    t_end <- dfw$month_date[win]
+
+    all_rows[[row_counter]] <- tibble(
+      region = r,
+      month_date = t_end,
+      alpha = a0,
+      !!!as.list(betas)
+    )
+    row_counter <- row_counter + 1L
+  }
+}
+
+# Result 
+coefs_ridge_roll <- bind_rows(all_rows)
+write_csv(coefs_ridge_roll, "data/df_ols_coef.csv")
+
+# Plot the rolling coefficients for selected regions
+selected_r <- coefs_ridge_roll |>
+  filter(region == "MELBOURNE - INNER") |>
+  arrange(month_date) |>
+  pivot_longer(all_of(predictors), names_to = "factor", values_to = "beta")
+
+# !!double check this plot 
+ggplot(selected_r , aes(x = month_date, y = beta, colour = factor)) +
+  geom_line() +
+  geom_smooth(se = FALSE, method = "loess", span = 0.2, linewidth = 0.6, alpha = 0.6) +
+  labs(
+    title = "Rolling coefficients (Melbourne)", x = NULL, y = "Coefficient", colour = "Predictor") +
+  theme_minimal(base_size = 12)
+
+# Distribution of rolling coefficients for all regions
+all_long <- coefs_ridge_roll |> 
+  pivot_longer(all_of(predictors), names_to = "factor", values_to = "beta")
+
+ggplot(all_long, aes(x = beta)) +
+  geom_density() +
+  facet_wrap(~ factor, scales = "free_y") +
+  labs(
+    title = "Distribution of rolling coefficients (all regions)", x = "Coefficient", y = "Density") +
+  theme_minimal()
 ```
+
+- To be added: more plots and analysis on rolling OLS result 
+
 
 ---Progress here--- 
 # Boundedness Test on the Factor Trends (WIP)
