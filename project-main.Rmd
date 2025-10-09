@@ -332,7 +332,7 @@ The linear model regresses each regional housing index on the factor proxies, yi
 
 Residual diagnostics from the static factor model indicated autocorrelation, suggesting that regional price dynamics were not fully captured by contemporaneous factors alone. To address this, the model was extended using an ARIMAX framework, retaining the same factor proxies as exogenous variables while incorporating autoregressive and moving-average terms to account for temporal dependence. An expanding-window approach was adopted to re-estimate models as new data became available, enabling coefficients to adapt to evolving market conditions and improving both model stability and forecast accuracy.
 
-# Use Case 
+## Use Case 
 
 The resulting model provides a practical framework for analysing and forecasting regional housing markets across Australia. By quantifying how each region responds to national, mining, and lifestyle factors, the model enables identification of regions most exposed to structural trends, such as shifts in mining investment or lifestyle migration. These outputs can inform policy analysis, highlighting areas vulnerable to affordability pressures or cyclical volatility, and support investment decisions by revealing which regions are likely to outperform or lag under different macroeconomic conditions. 
 
@@ -347,7 +347,7 @@ The datasets used in this project come primarily from the Australian Bureau of S
 * Geographic data for SA4 regions, named `SA4_2021_AUST_SHP_GDA2020.shp`
 * Economic data including GDP, exchange rate, and mining expenditure, named `data.xlsx`, `key_economic_data.xlsx`, and `mining_expenditure.xlsx` (WIP)
 
-### Project Limitation 
+## Project Limitation 
 
 This project faces several dataset-related limitations, including but not limited to the following:
 
@@ -1316,18 +1316,7 @@ reg_compare |>
 ```
 
 
-# Model Enhancement II: Time-dependent Coefficients 
-
-(WIP - rolling ridge regression)
-Forecasts for each major city and SA4 region are obtained by combining the projected factor trends with the static coefficients from the factor model. Specifically, the estimated loadings are applied to the forecasted values of factors to produce region-specific housing price index projections.
-
-As the coefficients are fixed, the projected indexes evolve in parallel with the factor trends, scaled by their respective loadings, as illustrated in the accompanying figure. To capture greater regional heterogeneity, the subsequent stage of the analysis will extend the model to incorporate time-varying coefficients.
-
-Rolling ridge regression is employed as small and noisy samples (particularly with volatile factors such as mining and lifestyle, can lead to instability in OLS-based rolling coefficient estimates) which adds a penalty term (λ) to the loss function to shrink coefficient estimates towards zero. This regularization helps reduce variance and improve out-of-sample performance, especially when predictors are correlated or the sample size is limited.
-
-We set a 60-month window to captures regime shifts faster and used grid search to identify the global λ that minimises out-of-sample RMSE across all regions. This λ is then applied in a rolling regression framework to estimate time-varying regional coefficients. The optimal λ, 0.0475, indicates a light penalty that nonetheless helps stabilise the estimates. After that we fit rolling ridge regressions for each region using the chosen λ. The resulting time-varying coefficients capture evolving regional sensitivities to the national, mining and lifestyle trends. 
-
-We apply a rolling regression using a fixed 5-year window. For each region, the data are split into overlapping windows of equal length, each shifted forward by one month. Within each window we fit a penalised linear regression to estimate the intercept and factor coefficients. The resulting coefficients are recorded at the end of the window, then the window is advanced and the process repeats. This produces a time-series of coefficients for every region showing how the influence of the underlying factors evolves gradually over time.
+## Model Enhancement II: Time-dependent Coefficients 
 
 ```{r roll-ridge, eval = FALSE}
 # Config set up cv for lambda 
@@ -1437,9 +1426,90 @@ ggplot(all_long, aes(x = beta)) +
   theme_minimal()
 ```
 
-(NEW - expending window)
+The expanding window approach was used to assess the stability of model coefficients over time. By gradually extending the estimation sample, we tested whether the relationships between regional housing indices and key factors remained consistent as new data of the following years was added. We refitted the OLS regression twice: First using data up to June 2021, and again including data up to June 2023. Comparing these two sets of coefficients allowed us to evaluate how much the estimated sensitivities of each factor changed when the sample expanded by two years.
 
-```{r}
+The table results displays the average yearly change and standard deviation of coefficients across regions. The intercept and market factors show small but positive shifts, while mining and lifestyle remain nearly unchanged. This suggests that the overall influence of these factors on housing prices has been highly stable between 2021 and 2023. While whe scatter plot compares the 2021 and 2023 coefficients for each factor. Points closely follow the 45° line, confirming that the factor effects are nearly identical across years. 
+
+In conclusion, adding the most recent year of data did not materially alter the model’s relationships, supporting the robustness of the factor structure.
+
+```{r expending-window}
+# Configuration 
+target <- "value"
+predictors <- c("market","mining_ps","lifestyle")
+panel <- sa4_indexes_long |>
+  inner_join(factor_trends, by = "month_date") |> 
+  select(-mining) |> 
+  arrange(region, month_date) |> 
+  drop_na(all_of(c(target, predictors)))
+
+# Set up cutoff dates - two years apart 
+start_date <- as.Date("1998-06-01")
+end_date   <- as.Date("2023-06-01")
+cutoffs    <- as.Date(c("2021-06-01", "2023-06-01")) 
+
+# Refit ols for expanding window 
+fit_ols <- function(y, X) {
+  Xs <- scale(as.matrix(X))
+  co <- coef(lm(y ~ Xs))
+  tibble(
+    intercept = unname(co[1]),
+    !!!setNames(as.list(unname(co[-1])), predictors)
+  )
+}
+
+# Build window 
+expand_to <- function(df, cut) {
+  df_win <- df |>
+    filter(month_date >= start_date, month_date <= cut)
+  fit_ols(
+    y = df_win[[target]],
+    X = df_win[, predictors, drop = FALSE]
+  ) |>
+    mutate(till_date = cut)
+}
+
+# Results 
+coefs_cuts <- panel |>
+  filter(month_date >= start_date, month_date <= end_date) |>
+  group_by(region) |>
+  group_modify(~{
+    reg <- .x
+    purrr::map_dfr(cutoffs, ~ expand_to(reg, .x))
+  }) |>
+  ungroup()
+
+# Comparison - table and plot 
+coef_diff <- coefs_cuts |>
+  rename(mining = mining_ps) |> 
+  pivot_longer(
+    cols = c(intercept, market, mining, lifestyle),
+    names_to = "factor", values_to = "beta"
+  ) |>
+  pivot_wider(
+    names_from = till_date, 
+    values_from = beta
+  ) |> 
+  rename(as_of_2021 = `2021-06-01`, as_of_2023 = `2023-06-01`) |>
+  mutate(diff = as_of_2023 - as_of_2021) 
+
+coef_diff_tbl <- coef_diff |>
+  group_by(factor) |>
+  summarise(mean_change = mean(diff), sd_change = sd(diff)) 
+  
+kable(coef_diff_tbl, 
+      caption = "Mean and Standard Deviation of Coefficient Changes (2021-2023)", digits = 4)
+
+ggplot(coef_diff, aes(x = as_of_2023, y = as_of_2021, colour = factor)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.8) +
+  facet_wrap(~factor, scales = "free") +
+  labs(
+    title = "Coefficient Stability: 2021 vs 2023",
+    subtitle = "Coefficients show strong year-to-year stability across regions",
+    x = "Coefficient (up to 2021-06)",
+    y = "Coefficient (up to 2023-06)"
+  ) +
+  theme_minimal()
 
 ```
 
