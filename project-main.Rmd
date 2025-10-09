@@ -106,6 +106,31 @@ com_PS <- com_PS |>
 
 factor_trends <- factor_trends |> 
   inner_join(com_PS, by = "month_date")
+
+# Change coefficient into PS spread 
+sa4_indexes_long <- sa4_indexes |>
+  pivot_longer(cols = -month_date, names_to = "region", values_to = "value")
+
+reg_coefs_miningps <- sa4_indexes_long |> 
+  inner_join(factor_trends, by = "month_date") 
+
+reg_coefs_ps <- reg_coefs_miningps |> 
+  group_by(region) |> 
+  group_modify(~{
+    fit <- lm(value ~ market + mining_ps + lifestyle, data = .x)
+    gl  <- glance(fit)
+    tt  <- tidy(fit)
+    dw  <- tryCatch(dwtest(fit)$statistic[[1]], error = function(e) NA_real_)
+    tibble(
+      alpha = tt$estimate[tt$term == "(Intercept)"],
+      market = tt$estimate[tt$term == "market"],
+      mining = tt$estimate[tt$term == "mining_ps"],
+      lifestyle = tt$estimate[tt$term == "lifestyle"],
+      r2 = gl$r.squared %||% NA_real_,
+      durbin_watson = dw)}) |> 
+  ungroup() |> 
+  select(region, alpha, r2, durbin_watson, market, mining, lifestyle)
+
 ```
 
 ```{r pc3-proxy-current, eval = FALSE}
@@ -303,6 +328,14 @@ Once the factor proxies were defined, we modelled each factor series separately 
 
 The linear model regresses each regional housing index on the factor proxies, yielding coefficients that represent the sensitivity of local markets to the underlying factors: \(\mu_r = \beta_{National} + \lambda_r \delta_{Mining} + \gamma_r \delta_{lifestyle} + \varepsilon\), the coefficients β, λ and γ are estimated for each region r. These coefficients help to capture the response of the local market to each factor. Model performance was evaluated using R-squared and residual diagnostics to check that key assumptions held. Forecasts of the factor proxies were then substituted into the model to obtain projected housing indexes. To account for changing dynamics, coefficients were re-estimated with rolling windows, allowing them to vary over time and better capture evolving market conditions.
 
+### Factor Model Enhancement 
+
+Residual diagnostics from the static factor model indicated autocorrelation, suggesting that regional price dynamics were not fully captured by contemporaneous factors alone. To address this, the model was extended using an ARIMAX framework, retaining the same factor proxies as exogenous variables while incorporating autoregressive and moving-average terms to account for temporal dependence. An expanding-window approach was adopted to re-estimate models as new data became available, enabling coefficients to adapt to evolving market conditions and improving both model stability and forecast accuracy.
+
+# Use Case 
+
+The resulting model provides a practical framework for analysing and forecasting regional housing markets across Australia. By quantifying how each region responds to national, mining, and lifestyle factors, the model enables identification of regions most exposed to structural trends, such as shifts in mining investment or lifestyle migration. These outputs can inform policy analysis, highlighting areas vulnerable to affordability pressures or cyclical volatility, and support investment decisions by revealing which regions are likely to outperform or lag under different macroeconomic conditions. 
+
 ## Datasets 
 
 The datasets used in this project come primarily from the Australian Bureau of Statistics (ABS), covering housing price indexes and selected macroeconomic indicators. In addition, we make use of internally developed datasets, including preliminary outputs such as PCA results and estimated static coefficients. All datasets are organised and available in the data folder: 
@@ -314,26 +347,29 @@ The datasets used in this project come primarily from the Australian Bureau of S
 * Geographic data for SA4 regions, named `SA4_2021_AUST_SHP_GDA2020.shp`
 * Economic data including GDP, exchange rate, and mining expenditure, named `data.xlsx`, `key_economic_data.xlsx`, and `mining_expenditure.xlsx` (WIP)
 
-### Data Limitation 
+### Project Limitation 
 
 This project faces several dataset-related limitations, including but not limited to the following:
 
 * Historical Scope: PCA results and coefficients are based on 25 years of data (1998–2023), which may not fully reflect future patterns.
-* Macroeconomic Breadth: Available economic indicators are narrow and may miss other important drivers of housing prices.
-* Geographic Coverage: Indexes are only available at city and SA4 levels, limiting insights into finer sub-regional dynamics.
 * Measurement Bias: Indexes rely on hedonic and repeat-sales methods, which involve assumptions that may introduce bias.
 * Proxy Validity: Factor proxies are heuristic choices and may not perfectly represent the underlying principal components.
-* Model Assumptions: Linear regression assumes simple linear relationships, overlooking possible nonlinear interactions.
 * Data Sensitivity: Outcomes are highly data-driven and depend strongly on the chosen datasets and methods.
 * Structural Shocks: Events like the mining boom, COVID-19, or policy shifts may not be well captured by static models or PCA.
-* Endogeneity Risk: Factor spreads (e.g., mining, lifestyle) may themselves be influenced by national trends, complicating interpretation.
-* Forecast Stability: Forecasts rely on static coefficients, which may not hold under changing macroeconomic or demographic conditions.
 
-# Factor trends as PC proxies
+# From Principal Components to Factor Proxies
 
-The national trend (U) exhibits a close correspondence with PC1 (market), while the Perth–Sydney spread (δPS) aligns with PC2 (mining). Given that these principal components account for the majority of variance in the index, our preliminary analysis focuses on U and δPS, with subsequent extensions planned. (WIP - might add lifestyle)
+As noted earlier, the PCA component of this work was conducted by Will Sijp as part of Sijp et al. (2025), and this project builds upon that foundation by constructing factor trends to serve as proxies for the principal components. The criterion for a good proxy is achieving a statistical correlation of around 96% with the original PC series.
 
-We examined whether PC2 is better represented by the Brisbane–Sydney or Perth–Sydney spread by comparing the shapes of the standardised series and testing their correlations with PC2. The Perth–Sydney spread aligns more closely with PC2: The scatterplot shows a distribution that falls more evenly along the regression line, and its correlation with PC2 is slightly higher (98% versus 96% for the Brisbane–Sydney spread). While the difference is minor and not statistically significant, the Perth–Sydney spread is the stronger candidate as a proxy for PC2.
+To develop these proxies, we:
+
+-   Analysed the PCA loadings to identify regions with the strongest positive and negative contributions to each component.
+-   Formulated candidate proxies as linear combinations of housing indexes from these influential regions, focusing on those with clear economic or interpretive relevance.
+-   Assessed the strength of each candidate by measuring its correlation with the corresponding principal component score.
+
+To illustrate this process, we compared two candidate combinations for representing PC2 (the mining factor): the Brisbane–Sydney and Perth–Sydney spreads. By examining the shapes of the standardised series and testing their correlations with PC2, we found that the Perth–Sydney spread aligns more closely with the original component. 
+
+Its scatterplot shows a tighter fit along the regression line, and the correlation with PC2 is marginally higher (98% versus 96% for the Brisbane–Sydney spread). Although the difference is small and not statistically significant, the Perth–Sydney spread provides the more robust proxy for PC2.
 
 ```{r examine-pc2-corr}
 # Join PC2 with both series 
@@ -346,7 +382,7 @@ mining_cmp <- factor_trends |>
   rename(period = month_date) |> 
   inner_join(Z2, by = "period") |> 
   mutate(
-    z2_std     = as.numeric(scale(pc_value)),
+    z2_std = as.numeric(scale(pc_value)),
     deltaBS_std = as.numeric(scale(mining)),
     deltaPS_std = as.numeric(scale(mining_ps))
   )
@@ -367,7 +403,7 @@ plot_ts <- mining_cmp |>
   theme_minimal()
 
 # Compare correlation 
-corr_bs <- cor(mining_cmp$pc_value, mining_cmp$mining,   use = "complete.obs")
+corr_bs <- cor(mining_cmp$pc_value, mining_cmp$mining, use = "complete.obs")
 corr_ps <- cor(mining_cmp$pc_value, mining_cmp$mining_ps, use = "complete.obs")
 
 # Scatter plot 
@@ -376,7 +412,7 @@ scatter_df <- mining_cmp |>
   pivot_longer(cols = c(mining, mining_ps),
                names_to = "spread", values_to = "spread_value") |> 
   mutate(spread = recode(spread,
-                         mining    = glue("δBS (r = {round(corr_bs, 3)})"),
+                         mining = glue("δBS (r = {round(corr_bs, 3)})"),
                          mining_ps = glue("δPS (r = {round(corr_ps, 3)})")))
 
 plot_scatter <- ggplot(scatter_df, aes(x = pc_value, y = spread_value)) +
@@ -735,7 +771,7 @@ last_idx <- max(train_PS$date)
 future_PS <- tibble(date = last_idx + (1:h), boom = 0L, decline = 0L) |> as_tsibble(index = date)
 
 fc_U  <- fabletools::forecast(fit_U,  h = h, level = c(80, 95))
-fc_PS <- forecast::forecast(fit_PS, new_data = future_PS , h = h, level = c(80, 95))
+fc_PS <- fabletools::forecast(fit_PS, new_data = future_PS , h = h, level = c(80, 95))
 
 # Produce fan with for U 
 fcbands_U <- fc_U |> 
@@ -1083,15 +1119,33 @@ ggpairs(
        subtitle = "Regions more sensitive to the national housing trend generally show lower sensitivity to mining dynamics") 
 ```
 
-We tested ARIMAX to check if it could remove residual autocorrelation, which would indicate that static coefficients are adequate. 
-ARIMAX keeps the regression coefficients fixed while applying an ARIMA model to the residuals. We initially fitted baseline ARIMA models (110, 011, 010, 111) and selected the best specification by balancing AICc values with the Ljung–Box test p-values, which indicate whether the residuals resemble white noise. 
+# Model Enhancement 
 
-The ARIMA(1,1,0) model performed best, with 69.3% of SA4 regions showing residuals with p-values above 5%. For the remaining regions that failed the test, we applied two refinements: a seasonal model with seasonal (1,0,0) for regions with strong seasonality, and an AR(2) model for those with short-lag autocorrelation. These adjustments improved the overall pass rate to 86.4%.
+From the analysis of the OLS factor model, several limitations were identified:
+
+-   Strong residual autocorrelation, reflecting the trending and persistent nature of housing price movements.
+
+-   Spatial variation in model fit, with mining-exposed regions showing weaker R² values and more dispersed coefficient estimates.
+
+-   Lack of temporal adaptability, as static coefficients cannot capture evolving relationships between regional markets and national or sectoral factors.
+
+To address these issues, two key enhancements were introduced:
+
+-   ARIMAX-based residual control, incorporating autoregressive and moving-average terms to explicitly model autocorrelation and stabilise residuals.
+
+-   Time-varying estimation using expanding windows, allowing coefficients to evolve with changing market conditions and improving responsiveness to structural shifts in housing dynamics.
+
+## Model Enhancement I: ARIMAX-Based Residual Control
+
+The ARIMAX approach retains fixed regression coefficients while modelling the residuals with an ARIMA process. Several baseline specifications (1,1,0),(0,1,1),(0,1,0),(1,1,1) were tested, and the optimal model was chosen by balancing AICc performance with Ljung–Box test results, ensuring that the residuals approximated white noise.
+
+The ARIMA(1,1,0) specification achieved the strongest overall performance, with 69.3% of SA4 regions exhibiting residuals whose Ljung–Box p-values exceeded the 5% threshold, indicating adequately whitened residuals. 
+
+For the remaining regions that did not meet this criterion, we analysed their residual patterns to identify the underlying causes of autocorrelation. Regions displaying clear seasonal patterns were refitted using a seasonal ARIMA(1,0,0)[12]model, while those showing short-lag dependence were assigned an AR(2) structure. Incorporating these targeted refinements raised the proportion of regions passing the diagnostic test to 86.4%, substantially improving overall model adequacy.
+
+(need to add ARIMAX models explanation here)
 
 ```{r reg-arimax}
-sa4_indexes_long <- sa4_indexes |>
-  pivot_longer(cols = -month_date, names_to = "region", values_to = "value")
-
 # Define variables 
 x_df <- factor_trends |> select(month_date, market, mining_ps, lifestyle)
 
@@ -1197,6 +1251,23 @@ results_arimax <- bind_rows(
 
 kable(results_arimax, caption = "Model Diagnostics: p-values and AICc across ARIMA Variants")
 
+# Bind all airmax models 
+refit_regions <- c(short_lag_regions, seasonal_regions)
+fit_xreg_clean <- fit_xreg |> filter(!region %in% refit_regions)
+
+fit_all <- bind_rows(
+  fit_xreg_clean |> mutate(spec_label = "baseline (1,1,0)"),
+  fit_xreg_short,
+  fit_xreg_seasonal
+) 
+
+reg_coefs_arimax <- fit_all |>
+  group_by(region, spec_label) |> 
+  slice(1) |> 
+  ungroup() |> 
+  mutate(coefs = map(model, coef)) |>
+  unnest_wider(coefs) |> 
+  select(region, market, mining = mining_ps, lifestyle, spec_label)
 
 # This is the code for the PCF, PACF plots for the regions with p under 0.05 
 # for (r in region_not_fit ) {
@@ -1209,40 +1280,48 @@ kable(results_arimax, caption = "Model Diagnostics: p-values and AICc across ARI
 #  gridExtra::grid.arrange(p1, p2, ncol = 2)}
 ```
 
-# Model Improvement with Time-dependent Coefficients 
+This section compares the coefficient distributions for three factors across two modelling approaches: OLS and ARIMAX. The OLS model (blue) represents a static regression using contemporaneous factors only, while the ARIMAX model (red) incorporates time-series autocorrelation to account for temporal dependencies in the residuals.
 
+- Market Factor: Both models yield strong positive coefficients with tightly clustered distributions. The medians are nearly identical, and the IQRs are narrow. This consistency confirms that national market trends exert a robust and uniform influence on regional price movements, irrespective of the modelling framework.
+
+- Mining Factor: Median coefficients are close to zero in both models. However, the OLS model exhibits a wider spread, including more positive outliers. In contrast, ARIMAX produces smaller and more stable estimates. This suggests that once time-series persistence is accounted for, the mining signal is partially absorbed, reducing its apparent impact while retaining its relevance.
+
+- Lifestyle Factor: Both models show similar distributions, with medians around 0.3 and comparable IQRs. ARIMAX coefficients are more tightly clustered, indicating a slight attenuation of the lifestyle signal when autocorrelation is modelled. This implies that lifestyle effects are modest and less regionally variable once temporal dynamics are considered.
+
+```{r coef-compare}
+# Compare coefficients: OLS & ARIMAX 
+reg_coefs_ps <- reg_coefs_ps |> mutate(model_type = "OLS")
+reg_coefs_arimax <- reg_coefs_arimax |> mutate(model_type = "ARIMAX")
+
+reg_compare <- bind_rows(reg_coefs_ps, reg_coefs_arimax) |> 
+  select(region, model_type, market, mining, lifestyle) 
+
+# Save coefficient comparison data frame 
+write_csv(reg_compare, "data/df_coef_compare.csv")
+
+reg_compare |>
+  pivot_longer(cols = c(market, mining, lifestyle),
+               names_to = "factor",
+               values_to = "estimate") |>
+  ggplot(aes(x = model_type, y = estimate, fill = model_type)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.2) +
+  facet_wrap(~factor, scales = "free_y") +
+  labs(
+    title = "Coefficient Comparison: OLS (PS) vs ARIMAX",
+    x = NULL,
+    y = "Coefficient Value"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+
+# Model Enhancement II: Time-dependent Coefficients 
+
+(WIP - rolling ridge regression)
 Forecasts for each major city and SA4 region are obtained by combining the projected factor trends with the static coefficients from the factor model. Specifically, the estimated loadings are applied to the forecasted values of factors to produce region-specific housing price index projections.
 
 As the coefficients are fixed, the projected indexes evolve in parallel with the factor trends, scaled by their respective loadings, as illustrated in the accompanying figure. To capture greater regional heterogeneity, the subsequent stage of the analysis will extend the model to incorporate time-varying coefficients.
-
-```{r forecast-coef}
-reg_coefs1 <- reg_coefs |> select(region_level, region, alpha, market, mining)
-
-regional_forecasts <- df_fc |>
-  crossing(reg_coefs1) |> 
-  mutate(
-    mu_fct = alpha + market * mean_U + mining * mean_PS,
-    lo80 = alpha + market * lo80_U + mining * lo80_PS,
-    hi80 = alpha + market * hi80_U + mining * hi80_PS,
-    lo95 = alpha + market * lo95_U + mining * lo95_PS,
-    hi95 = alpha + market * hi95_U + mining * hi95_PS
-  ) |>
-  select(date, region_level, region, mu_fct, lo80, hi80, lo95, hi95)
-
-# Plot major city forecasted indexes 
-major_city_fc <- regional_forecasts |>
-  filter(region_level == "major_city")
-
-ggplot(major_city_fc, aes(x = date, y = mu_fct, colour = region, fill = region)) +
-  geom_line(size = 0.5) +
-  labs(title = "Forecasted Housing Indexes for Major Cities",
-       subtitle = "Trend differences between cities driven by their factor coefficient",
-       x = "Date", y = "Forecasted Index",
-       colour = "City", fill = "City") +
-  theme_minimal(base_size = 10) 
-```
-
-## Rolling Ridge Regression
 
 Rolling ridge regression is employed as small and noisy samples (particularly with volatile factors such as mining and lifestyle, can lead to instability in OLS-based rolling coefficient estimates) which adds a penalty term (λ) to the loss function to shrink coefficient estimates towards zero. This regularization helps reduce variance and improve out-of-sample performance, especially when predictors are correlated or the sample size is limited.
 
@@ -1250,12 +1329,11 @@ We set a 60-month window to captures regime shifts faster and used grid search t
 
 We apply a rolling regression using a fixed 5-year window. For each region, the data are split into overlapping windows of equal length, each shifted forward by one month. Within each window we fit a penalised linear regression to estimate the intercept and factor coefficients. The resulting coefficients are recorded at the end of the window, then the window is advanced and the process repeats. This produces a time-series of coefficients for every region showing how the influence of the underlying factors evolves gradually over time.
 
-```{r ols-lambda}
-# Config set up with grid search for lambda 
+```{r roll-ridge, eval = FALSE}
+# Config set up cv for lambda 
 target <- "value"
 predictors <- c("market","mining_ps","lifestyle")
 win <- 60 
-lambda_grid <- exp(seq(log(1e-4), log(1), length.out = 20))
 
 # Set up panel 
 panel <- sa4_indexes_long |>
@@ -1270,7 +1348,7 @@ X_all <- as.matrix(panel[, predictors, drop = FALSE])
 y_all <- panel[[target]]
 
 # Cross-validation to choose lambda
-cvfit <- cv.glmnet(x = X_all, y = y_all, alpha = 0, family = "gaussian", intercept = TRUE, standardize = TRUE, nfolds = 5)
+cvfit <- cv.glmnet(x = X_all, y = y_all, alpha = 0, family = "gaussian", intercept = TRUE, standardize = FALSE, nfolds = 5)
 
 lambda_best <- cvfit$lambda.min
 
@@ -1324,16 +1402,23 @@ for (r in regions) {
 
 # Result 
 coefs_ridge_roll <- bind_rows(all_rows)
-write_csv(coefs_ridge_roll, "data/df_ols_coef.csv")
+write_csv(coefs_ridge_roll, "data/df_ridge_coef.csv")
+
+#names_unique <- unique(coefs_ridge_roll$region) |> print()
 
 # Plot the rolling coefficients for selected regions
-selected_r <- coefs_ridge_roll |>
+s_mel <- coefs_ridge_roll |>
   filter(region == "MELBOURNE - INNER") |>
   arrange(month_date) |>
   pivot_longer(all_of(predictors), names_to = "factor", values_to = "beta")
 
+s_syd <- coefs_ridge_roll |>
+  filter(region == "SYDNEY - CITY AND INNER SOUTH") |>
+  arrange(month_date) |>
+  pivot_longer(all_of(predictors), names_to = "factor", values_to = "beta")
+
 # !!double check this plot 
-ggplot(selected_r , aes(x = month_date, y = beta, colour = factor)) +
+ggplot(s_mel, aes(x = month_date, y = beta, colour = factor)) +
   geom_line() +
   geom_smooth(se = FALSE, method = "loess", span = 0.2, linewidth = 0.6, alpha = 0.6) +
   labs(
@@ -1352,157 +1437,130 @@ ggplot(all_long, aes(x = beta)) +
   theme_minimal()
 ```
 
-- To be added: more plots and analysis on rolling OLS result 
+(NEW - expending window)
 
+```{r}
 
----Progress here--- 
-# Boundedness Test on the Factor Trends (WIP)
-
-(WIP - examine numbers since we switched to PS; Add more methodologies with the forecast model should be built at this stage)
-
-To justify including δPS alongside the national trend U in the factor model, we need to show that δPS is more bounded over time, meaning it stays within a narrower range and has lower long-term volatility by comparing δPS and U using overall statistics and rolling-window measures.
-
-* The global summary (entire time period) of δPS and U covered several different measures, each of them captures different aspect of spread. The statistics includes: 
-  * Standard deviation: The average distance of each observation to the series mean. If δPS has a smaller standard deviation than U, it indicates that δPS is more stable and less volatile over the entire period.
-  * Interquartile range: The spread of the medium 50% of the data, if δPS has a tighter interquartile range than U, then it is generally more stable. 
-  * Median aPSolute deviation: The median of abolute deviations from the mean. This measure is more robust to outliers. If the value of δPS is lower than U, it indicates that δPS has less extreme fluctuations.
-  * Total range: The difference between the maximum and minimum values in the series, which examines the extreme swings in the series.  
-
-We next applied rolling windows of 12 and 24 months to the same statistics. Rather than using the entire time span at once, this approach slides a fixed-length window along the series, calculating the variability measures at each step using only the most recent 12 or 24 months of data. This method highlights how the volatility and dispersion of δPS and U evolve over time. 
-
-We use 12-month windows to smooth short-term fluctuations and capture typical annual housing cycles, helping assess if volatility is bounded within a year. The 24-month windows extend the view, showing whether this boundedness holds beyond yearly patterns and reflecting medium-term events.
-
-To keep the report concise, we highlight two plots: the 12-month rolling standard deviation for short-term volatility and the 24-month rolling range for longer-term fluctuations.
-
-Finally, we calculated the proportion of time (by 12 and 24 months respectively) in which δPS had a lower spread than U, giving a simple measure of how often it was more bounded.
-
-```{r eval = FALSE}
-# Load df 
-factor_trends_ana <- factor_trends |>
-  select(month_date, U = market, PS = mining) 
-
-# Global comparison - full period 
-global_summary <- factor_trends_ana |>
-  summarise(
-    sd_U = sd(U),
-    sd_PS = sd(PS),
-    var_U = var(U),
-    var_PS = var(PS),
-    iqr_U = IQR(U),
-    iqr_PS = IQR(PS),
-    range_U = diff(range(U)),
-    range_PS = diff(range(PS)),
-    mad_U = mad(U, center = median(U)),
-    mad_PS = mad(PS, center = median(PS))
-  ) 
-
-global_ratio <- global_summary |>
-  mutate(
-    sd_ratio_PS_over_U = sd_PS / sd_U,
-    iqr_ratio_PS_over_U = iqr_PS / iqr_U,
-    mad_ratio_PS_over_U = mad_PS / mad_U,
-    rng_ratio_PS_over_U = range_PS / range_U
-  ) |>
-  select(sd_ratio_PS_over_U,
-         iqr_ratio_PS_over_U,
-         mad_ratio_PS_over_U,
-         rng_ratio_PS_over_U) 
-
-kable(global_ratio, caption = "Global Summary Statistics") 
 ```
 
-The global ratios are all well below 1, meaning δPS has consistently lower spread than U across all four measures. This supports δPS being more bounded overall.
+# Assessing the Boundedness of Market-Driven Forecasts
 
-```{r eval = FALSE}
-# Rolling window config (12 and 24 months) 
-w12 <- 12
-w24 <- 24
+To evaluate the reliability and stability of the regional housing forecasts, we assessed how bounded the projections are when driven solely by the national market factor. 
 
-# Functions for rolling statistics (SD, IQR, Range)
-roll_sd   <- function(x, k)
-  slide_dbl(x, sd, .before = k - 1, .complete = TRUE)
+The analysis was conducted using coefficients derived from both the OLS and ARIMAX specifications. While the OLS model provides a static benchmark, the ARIMAX model extends it by accounting for temporal dependence and reducing residual autocorrelation. In both cases, the mining factor spread was treated as the only varying source of uncertainty, with all other factors held constant. For each region, the 10-year growth implied by the market factor was projected, and a 95 per cent multiplicative uncertainty band was computed based on the volatility of the mining factor and the residual variance from each model. 
 
-roll_iqr  <- function(x, k)
-  slide_dbl(x, IQR, .before = k - 1, .complete = TRUE)
-
-roll_rng  <- function(x, k)
-  slide_dbl(x, function(vec)
-    diff(range(vec)), .before = k - 1, .complete = TRUE)
-
-# Compute rolling statistics
-roll_stats <- factor_trends_ana |>
+```{r uncertainty-lv}
+# Variance from 95% interval of PS 
+df_fc_PS <- df_fc |>
   mutate(
-    # 12-month window
-    sd12_U = roll_sd(U, w12),
-    iqr12_U = roll_iqr(U, w12),
-    rng12_U = roll_rng(U, w12),
-    sd12_PS = roll_sd(PS, w12),
-    iqr12_PS = roll_iqr(PS, w12),
-    rng12_PS = roll_rng(PS, w12),
-    # 24-month window
-    sd24_U = roll_sd(U, w24),
-    iqr24_U = roll_iqr(U, w24),
-    rng24_U = roll_rng(U, w24),
-    sd24_PS = roll_sd(PS, w24),
-    iqr24_PS = roll_iqr(PS, w24),
-    rng24_PS = roll_rng(PS, w24)
+    half_width_95 = (hi95_PS - lo95_PS) / 2,
+    # Standard deviation 
+    sd_PS_95 = half_width_95 / 1.96,
+    # Variance
+    var_PS_95 = sd_PS_95^2
   )
-```
 
-```{r eval = FALSE}
-# Rolling 12-month SD plot 
-sd12_long <- roll_stats |>
-  select(month_date, sd12_U, sd12_PS) |>
-  pivot_longer(-month_date, names_to = "series", values_to = "sd12") 
+# Pull the variance 
+sigma_delta_10yPS <- df_fc_PS |> 
+  filter(date == max(date)) |> 
+  pull(var_PS_95)
 
-ggplot(sd12_long, aes(month_date, sd12, color = series)) +
-  geom_line() +
-  labs(
-    title = "Rolling 12-month Standard Deviation (SD)",
-    subtitle = "Lower values show less volatility over a 12-month period",
-    x = "Year",
-    y = "SD"
-  ) +
-  theme_minimal()
+# Rerun regression using only market and mining on city index 
+#city_indexes_long <- city_indexes |>
+ # pivot_longer(cols = -month_date, names_to = "region", values_to = "mu_r")
 
-# Rolling 24-month Range plot 
-rng24_long <- roll_stats |>
-  select(month_date, rng24_U, rng24_PS) |>
-  pivot_longer(-month_date, names_to = "series", values_to = "rng24") 
+reg_panel <- sa4_indexes_long |>
+  left_join(factor_trends |> select(month_date, U = market, PS = mining_ps), by = "month_date") 
 
-ggplot(rng24_long, aes(month_date, rng24, color = series)) +
-  geom_line() +
-  labs(
-    title = "Rolling 24-month Range",
-    subtitle = "Wider range means bigger swings over the period",
-    x = "Year", y = "Range"
-  ) +
-  theme_minimal()
+reg_coefs2 <- reg_panel |>
+  group_by(region) |>
+  do({
+    fit <- lm(value ~ U + PS, data = .)
+    tidy_fit <- tidy(fit)
+    glance_fit <- glance(fit)
+    tibble(
+      beta = tidy_fit$estimate[ tidy_fit$term == "U" ],
+      lambda = tidy_fit$estimate[ tidy_fit$term == "PS" ],
+      r2 = glance_fit$r.squared,
+      var_eps = glance_fit$sigma^2
+    )
+  })
+
+# 95% multiplicative uncertainty band - ols 
+reg_uncertainty_ols <- reg_coefs2 |>
+  mutate(
+    sd_r = sqrt(lambda^2 * sigma_delta_10yPS + var_eps),
+    band95_low = exp(-1.96 * sd_r),
+    band95_high = exp(1.96 * sd_r),
+    band_width = band95_high - band95_low,
+    perc_error = (band95_high - 1) * 100
+  )
+
+# arimax 
+var_eps_arimax <- fit_all |> 
+  group_by(region) |> 
+  summarise(var_eps = map_dbl(model, ~ .x$sigma2) |> mean(na.rm = TRUE), .groups = "drop")
+
+coefs_arimax <- reg_coefs_arimax |> 
+  transmute(region,
+            beta = market,
+            lambda = mining,
+            gamma = lifestyle)
+
+# 95% multiplicative uncertainty band - arimax
+reg_uncertainty_arimax <- coefs_arimax %>%
+  inner_join(var_eps_arimax, by = "region") %>%
+  mutate(
+    sd_r = sqrt(lambda^2 * sigma_delta_10yPS + var_eps),
+    band95_low  = exp(-1.96 * sd_r),
+    band95_high = exp( 1.96 * sd_r),
+    band_width  = band95_high - band95_low,
+    perc_error  = (band95_high - 1) * 100
+  )
 
 # Summary table 
-porp_summary <- tibble(
-  period = c("12-month", "24-month"),
-  prop_lower_sd = c(
-    mean(roll_stats$sd12_PS < roll_stats$sd12_U, na.rm = TRUE),
-    mean(roll_stats$sd24_PS < roll_stats$sd24_U, na.rm = TRUE)
-  ),
-  prop_lower_iqr = c(
-    mean(roll_stats$iqr12_PS < roll_stats$iqr12_U, na.rm = TRUE),
-    mean(roll_stats$iqr24_PS < roll_stats$iqr24_U, na.rm = TRUE)
-  ),
-  prop_lower_rng = c(
-    mean(roll_stats$rng12_PS < roll_stats$rng12_U, na.rm = TRUE),
-    mean(roll_stats$rng24_PS < roll_stats$rng24_U, na.rm = TRUE)
-  )
-)
+reg_uncertainty_summary <- reg_uncertainty_arimax |>
+  mutate(
+    bracket = case_when(
+      perc_error < 10 ~ "0–10%",
+      perc_error < 20 ~ "10–20%",
+      TRUE ~ "20%+"
+    )
+  ) |>
+  group_by(bracket) |>
+  summarise(
+    n_regions = n(),
+    avg_error_pct = mean(perc_error, na.rm = TRUE),
+    min_error_pct = min(perc_error, na.rm = TRUE),
+    max_error_pct = max(perc_error, na.rm = TRUE)
+  ) |>
+  arrange(bracket)
 
-kable(porp_summary, digits = 3, caption = "Proportion of Time δPS < U in Rolling Windows")
+kable(reg_uncertainty_summary,
+      caption = "Distribution of 10-Year Market-Only Forecast Uncertainty (ARIMAX Model)",
+      digits = 2)
+
+# Plot comparison - OLS and arimax 
+reg_uncertainty_wide <- reg_uncertainty_ols |>
+  select(region, perc_error_ols = perc_error) |>
+  inner_join(reg_uncertainty_arimax |> select(region, perc_error_arimax = perc_error), by = "region")
+
+ggplot(reg_uncertainty_wide, aes(x = perc_error_ols, y = perc_error_arimax)) +
+  geom_point(alpha = 0.7) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "red") +
+  labs(
+    title = "Region-wise Comparison of Forecast Uncertainty",
+    subtitle = "Points below the dashed line mean ARIMAX produces narrower uncertainty bands",
+    x = "OLS Percentage Error",
+    y = "ARIMAX Percentage Error"
+  ) +
+  theme_minimal()
 ```
 
-While the rolling-window plots and statistics give a more detailed picture: 
 
-* The 12-month rolling standard deviation plot shows that δPS is often less volatile than U, but not consistently (occasional spikes narrow the gap).
+# Appendix: Long-term projection and macroeconomic scenarios
 
-* The 24-month rolling range plot shows δPS has wider swings at times, but also periods where it is more stable than U, highlighting its tendency to avoid large swings over longer periods.
 
-* δPS has a lower spread than U in around 38.6% of the time for 12-month windows and 41.0% for 24-month windows, indicating it is more bounded (however less than half the time) in rolling windows.
+
+
+
