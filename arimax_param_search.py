@@ -132,7 +132,7 @@ if __name__ == '__main__':
         raise ValueError(f"Region '{region}' not found in indexes_city_and_sa4.csv columns.")
 
     y = df_indexes[region].astype(float)
-    required_cols = ['market', 'mining', 'lifestyle']
+    required_cols = ['market', 'mining']
     for c in required_cols:
         if c not in df.columns:
             raise ValueError(f"Column '{c}' not found in df_factor_trends.csv.")
@@ -144,10 +144,15 @@ if __name__ == '__main__':
 
     # --- OLS and HAC ----------------------------------------------------------
     ols, ols_hac = ols_with_hac(y_al, X_al)
+    exog_cols = list(X_al.columns)                 # e.g., ['market','mining']
+    ols_index = ['const'] + exog_cols
+
     print("\n=== OLS (levels) coefficients ===")
-    print(pd.Series(ols.params, index=['const','market','mining','lifestyle']))
+    print(pd.Series(ols.params, index=ols_index))
+
     print("\nNewey–West HAC standard errors (12 lags):")
-    print(pd.Series(ols_hac.bse, index=['const','market','mining','lifestyle']))
+    print(pd.Series(ols_hac.bse, index=ols_index))
+
 
     # --- VIF check ------------------------------------------------------------
     print("\n=== Variance Inflation Factors ===")
