@@ -132,7 +132,9 @@ if __name__ == '__main__':
         raise ValueError(f"Region '{region}' not found in indexes_city_and_sa4.csv columns.")
 
     y = df_indexes[region].astype(float)
-    required_cols = ['market', 'mining']
+    #required_cols = ['market', 'mining', 'lifestyle']
+    required_cols = ['market', 'mining', 'lifestyle']
+
     for c in required_cols:
         if c not in df.columns:
             raise ValueError(f"Column '{c}' not found in df_factor_trends.csv.")
