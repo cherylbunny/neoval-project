@@ -3,6 +3,11 @@
 ARIMAX regression of a regional housing index on three market factors
 with OLS + HAC, VIF collinearity checks, ARIMAX grid search, and optional
 ARDL(1)+ARIMAX robustness (lags of exogenous factors).
+
+New:
+- --fixed_order p,d,q  (e.g., 2,0,2) forces the ARIMA order
+- --order_2022         shorthand for --fixed_order 2,0,2
+- --exclude COL [COL...] to drop exogenous cols (e.g., --exclude lifestyle)
 """
 
 import os
@@ -23,6 +28,7 @@ import warnings
 warnings.filterwarnings("ignore", message="No frequency information was provided")
 warnings.filterwarnings("ignore", message="Maximum Likelihood optimization failed to converge")
 warnings.filterwarnings("ignore", message="Non-invertible starting MA parameters found")
+warnings.filterwarnings("ignore", message="Non-stationary starting autoregressive parameters found")
 
 # ---- Paths -----------------------------------------------------------------
 home_dir   = os.path.expanduser("~")
@@ -112,7 +118,17 @@ if __name__ == '__main__':
                         help="Run ARIMA order grid search (p,0,q) and pick best by AICc.")
     parser.add_argument('--ardl1', action='store_true',
                         help="Also run ARDL(1)+ARIMAX robustness with lagged factors.")
+    parser.add_argument('--fixed_order', type=str, default=None,
+                        help="Force ARIMA order as 'p,d,q' (e.g., '2,0,2'). Overrides --search/default.")
+    parser.add_argument('--order_2022', action='store_true',
+                        help="Shorthand for --fixed_order 2,0,2")
+    parser.add_argument('--exclude', nargs='*', default=[],
+                        help="Exogenous columns to exclude (e.g., --exclude lifestyle)")
+
     args = parser.parse_args()
+    if args.order_2022:
+        args.fixed_order = "2,0,2"
+
     region = args.region
 
     # --- Load data
@@ -132,12 +148,18 @@ if __name__ == '__main__':
         raise ValueError(f"Region '{region}' not found in sa4_indexes.csv columns.")
 
     y = df_indexes[region].astype(float)
-    #required_cols = ['market', 'mining', 'lifestyle']
-    required_cols = ['market', 'mining', 'lifestyle']
+
+    # Choose factors (default 3-factor; allow exclusions)
+    base_cols = ['market', 'mining', 'lifestyle']
+    required_cols = [c for c in base_cols if c not in set(args.exclude)]
 
     for c in required_cols:
         if c not in df.columns:
             raise ValueError(f"Column '{c}' not found in df_factor_trends.csv.")
+
+    if len(required_cols) < 1:
+        raise ValueError("No exogenous columns left after exclusions.")
+
     X = df[required_cols].astype(float)
 
     data = pd.concat([y.rename('y'), X], axis=1).dropna()
@@ -146,7 +168,7 @@ if __name__ == '__main__':
 
     # --- OLS and HAC ----------------------------------------------------------
     ols, ols_hac = ols_with_hac(y_al, X_al)
-    exog_cols = list(X_al.columns)                 # e.g., ['market','mining']
+    exog_cols = list(X_al.columns)                 # e.g., ['market','mining','lifestyle'] or subset
     ols_index = ['const'] + exog_cols
 
     print("\n=== OLS (levels) coefficients ===")
@@ -155,13 +177,34 @@ if __name__ == '__main__':
     print("\nNewey–West HAC standard errors (12 lags):")
     print(pd.Series(ols_hac.bse, index=ols_index))
 
-
     # --- VIF check ------------------------------------------------------------
     print("\n=== Variance Inflation Factors ===")
     print(compute_vif(X_al))
 
     # --- ARIMAX model ---------------------------------------------------------
-    if args.search:
+    # Decide order per flags
+    order = None
+    res = None
+
+    if args.fixed_order:
+        # parse 'p,d,q'
+        try:
+            order = tuple(int(s.strip()) for s in args.fixed_order.split(','))
+            if len(order) != 3:
+                raise ValueError
+        except Exception:
+            raise ValueError("--fixed_order must be like 'p,d,q', e.g., '2,0,2'")
+
+        print(f"\nFitting ARIMAX with fixed order {order} ...\n")
+        res = fit_arimax(y_al, X_al, order=order)
+        k = res.params.size
+        aicc_val = aicc(res.aic, nobs=res.nobs, kparams=k)
+        lb_p12 = acorr_ljungbox(res.resid, lags=[12], return_df=True)['lb_pvalue'].iloc[0]
+        print("AICc:", aicc_val)
+        print("Ljung–Box p(12):", float(lb_p12))
+        ljungbox_report(res.resid)
+
+    elif args.search:
         print("\nRunning expanded ARIMA grid search on (p,0,q)...\n")
         cands = search_arimax_levels(y_al, X_al)
         best  = cands[0]
@@ -171,8 +214,9 @@ if __name__ == '__main__':
         print("AICc:", best['aicc'])
         print("Ljung–Box p(12):", best['lb_p12'])
         ljungbox_report(res.resid)
+
     else:
-        order = (1,0,0)  # default AR(1) if no search requested
+        order = (1,0,0)  # default AR(1) if no search or fixed order
         res   = fit_arimax(y_al, X_al, order=order)
 
     print("\n=== ARIMAX exogenous coefficients (levels) ===")
@@ -181,7 +225,7 @@ if __name__ == '__main__':
     # --- Optional residual diagnostics plot -----------------------------------
     if args.save_diag:
         fig = res.plot_diagnostics(figsize=(10,6))
-        fig.suptitle(f"Residual diagnostics — {region} — order {order}", y=1.02)
+        fig.suptitle(f"Residual diagnostics — {region} — order {order} — X={exog_cols}", y=1.02)
         outdir = os.path.join(paper_path, 'figures')
         os.makedirs(outdir, exist_ok=True)
         fname = f"arimax_diag_{region.replace(' ','_').replace('/','-')}.png"
@@ -192,13 +236,25 @@ if __name__ == '__main__':
     if args.ardl1:
         print("\nRunning ARDL(1)+ARIMAX robustness check...\n")
         y_dyn, X_dyn = build_ardl1(X_al, y_al)
-        cands_dyn = search_arimax_levels(y_dyn, X_dyn)
-        best_dyn  = cands_dyn[0]
-        res_dyn   = best_dyn['res']
-        print("ARDL(1)+ARIMAX best order:", best_dyn['order'],
-              "AICc:", best_dyn['aicc'],
-              "LB p(12):", best_dyn['lb_p12'])
-        ljungbox_report(res_dyn.resid)
+
+        if args.fixed_order:
+            print(f"Fitting ARDL(1)+ARIMAX with fixed order {order} ...")
+            res_dyn = fit_arimax(y_dyn, X_dyn, order=order)
+            k_dyn = res_dyn.params.size
+            aicc_dyn = aicc(res_dyn.aic, nobs=res_dyn.nobs, kparams=k_dyn)
+            lb_dyn = acorr_ljungbox(res_dyn.resid, lags=[12], return_df=True)['lb_pvalue'].iloc[0]
+            print("ARDL(1)+ARIMAX fixed order:", order,
+                  "AICc:", aicc_dyn,
+                  "LB p(12):", float(lb_dyn))
+            ljungbox_report(res_dyn.resid)
+        else:
+            cands_dyn = search_arimax_levels(y_dyn, X_dyn)
+            best_dyn  = cands_dyn[0]
+            res_dyn   = best_dyn['res']
+            print("ARDL(1)+ARIMAX best order:", best_dyn['order'],
+                  "AICc:", best_dyn['aicc'],
+                  "LB p(12):", best_dyn['lb_p12'])
+            ljungbox_report(res_dyn.resid)
 
         cols = list(X_al.columns)  # contemporaneous factors
         betas_dyn = pd.Series(res_dyn.params[res_dyn.model.exog_names],
