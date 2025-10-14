@@ -118,7 +118,7 @@ if __name__ == '__main__':
     # --- Load data
     df_coefs  = pd.read_csv(os.path.join(data_path, 'df_reg_coefs.csv'))
     df        = pd.read_csv(os.path.join(data_path, 'df_factor_trends.csv'))
-    df_indexes= pd.read_csv(os.path.join(data_path, 'indexes_city_and_sa4.csv'))
+    df_indexes= pd.read_csv(os.path.join(data_path, 'sa4_indexes.csv'))
 
     # --- Indexing & alignment
     df_coefs = df_coefs.set_index('region')
@@ -129,7 +129,7 @@ if __name__ == '__main__':
     df_indexes = df_indexes.set_index('month_date').sort_index()
 
     if region not in df_indexes.columns:
-        raise ValueError(f"Region '{region}' not found in indexes_city_and_sa4.csv columns.")
+        raise ValueError(f"Region '{region}' not found in sa4_indexes.csv columns.")
 
     y = df_indexes[region].astype(float)
     #required_cols = ['market', 'mining', 'lifestyle']
