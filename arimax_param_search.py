@@ -112,6 +112,9 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--region', help="Region to model.", default="SYDNEY - BLACKTOWN")
+
+    parser.add_argument('--region_level', help="Region level to model.", default="sa4_name", choices=['sa4_name', 'major_city'])
+
     parser.add_argument('--save_diag', action='store_true',
                         help="Save residual diagnostics plot.")
     parser.add_argument('--search', action='store_true',
@@ -132,12 +135,16 @@ if __name__ == '__main__':
     region = args.region
 
     # --- Load data
-    df_coefs  = pd.read_csv(os.path.join(data_path, 'df_reg_coefs.csv'))
+    #df_coefs  = pd.read_csv(os.path.join(data_path, 'df_reg_coefs.csv'))
     df        = pd.read_csv(os.path.join(data_path, 'df_factor_trends.csv'))
-    df_indexes= pd.read_csv(os.path.join(data_path, 'sa4_indexes.csv'))
+
+    if args.region_level == 'major_city':
+        df_indexes= pd.read_csv(os.path.join(data_path, 'city_indexes.csv'))
+    else:
+        df_indexes= pd.read_csv(os.path.join(data_path, 'sa4_indexes.csv'))
 
     # --- Indexing & alignment
-    df_coefs = df_coefs.set_index('region')
+    #df_coefs = df_coefs.set_index('region')
     df['month_date'] = pd.to_datetime(df['month_date'])
     df_indexes['month_date'] = pd.to_datetime(df_indexes['month_date'])
 
