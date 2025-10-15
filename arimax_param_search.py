@@ -45,7 +45,7 @@ def fit_arimax(y: pd.Series, X: pd.DataFrame, order=(1,0,0)):
     mod = SARIMAX(
         endog=y, exog=X,
         order=order, seasonal_order=(0,0,0,0),
-        trend='n',
+        trend='c',
         enforce_stationarity=True, enforce_invertibility=True,
         measurement_error=False
     )
@@ -226,8 +226,26 @@ if __name__ == '__main__':
         order = (1,0,0)  # default AR(1) if no search or fixed order
         res   = fit_arimax(y_al, X_al, order=order)
 
-    print("\n=== ARIMAX exogenous coefficients (levels) ===")
-    print(res.params[res.model.exog_names])
+    print("\n=== ARIMAX intercept & exogenous coefficients (levels) ===")
+    # Make a labeled Series of all parameters
+    param_names = getattr(res, "param_names", None)
+    if param_names is None:  # very old statsmodels fallback
+        param_s = pd.Series(res.params)
+    else:
+        param_s = pd.Series(res.params, index=param_names)
+
+    exog_names = list(res.model.exog_names)
+    # Try to find the intercept name across statsmodels versions
+    int_key = next((k for k in param_s.index
+                    if "intercept" in k.lower() or k.lower() == "const"), None)
+
+    to_show = param_s[exog_names]
+    if int_key is not None and int_key in param_s.index:
+        to_show = pd.concat([param_s[[int_key]], to_show])
+
+    print(to_show)
+
+
 
     # --- Optional residual diagnostics plot -----------------------------------
     if args.save_diag:
