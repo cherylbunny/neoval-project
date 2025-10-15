@@ -14,6 +14,7 @@ Notes:
   - Components are *deterministic parts* of the mean (no ARMA correction). We
     align them to the actual series so they sit on the same vertical scale.
   - Alignment can be "mean" (default) or "first" observation.
+  - Add simple seasonality via --sorder P,D,Q,s (e.g. 0,0,1,12).
 """
 
 import os
@@ -32,10 +33,11 @@ DATA_PATH  = os.path.join(PAPER_PATH, "data")
 
 paper_path = '/Users/wsijp/Documents/github/neoval-project'
 
+# ----------------------- file helpers -----------------------
 def make_file_path(file, base_path = os.path.join(paper_path,'figures')):
     if len(file) < 1:
         raise Exception('Empty string provided for filename')
-    elif file[0] == '/':
+    if file[0] == '/':
         return file
     return os.path.join(base_path, file)
 
@@ -58,12 +60,20 @@ def show_or_save_fig(args, handle=None, subname=''):
         if args.fine_dpi: kwargs['dpi'] = 300
         handle.savefig(file_path, bbox_inches='tight', pad_inches=0.01, **kwargs)
 
-def parse_order(s: str):
+# ----------------------- utils ------------------------------
+def parse_order3(s: str):
     try:
         p,d,q = [int(x.strip()) for x in s.split(",")]
         return (p,d,q)
     except Exception:
         raise argparse.ArgumentTypeError("Order must be like '1,0,1'")
+
+def parse_sorder4(s: str):
+    try:
+        P,D,Q,S = [int(x.strip()) for x in s.split(",")]
+        return (P,D,Q,S)
+    except Exception:
+        raise argparse.ArgumentTypeError("Seasonal order must be like '0,0,1,12'")
 
 def ensure_monthly_freq(obj):
     obj = obj.copy()
@@ -73,10 +83,10 @@ def ensure_monthly_freq(obj):
 def aicc(aic: float, nobs: int, kparams: int) -> float:
     return aic + (2 * kparams * (kparams + 1)) / max(nobs - kparams - 1, 1)
 
-def fit_arimax_levels(y: pd.Series, X: pd.DataFrame, order=(1,0,1)):
+def fit_arimax(y: pd.Series, X: pd.DataFrame, order=(1,0,1), sorder=(0,0,0,0)):
     mod = SARIMAX(
         endog=y, exog=X,
-        order=order, seasonal_order=(0,0,0,0),
+        order=order, seasonal_order=sorder,
         trend='c',  # include intercept
         enforce_stationarity=True, enforce_invertibility=True,
         measurement_error=False
@@ -88,17 +98,21 @@ def lb_report(resid, lags=[6,12,18,24]):
     return {int(L): float(p) for L, p in zip(lb.index, lb['lb_pvalue'].values)}
 
 def align_to_reference(series: pd.Series, ref: pd.Series, how: str = "mean") -> pd.Series:
-    """Align 'series' vertically to 'ref' for plotting."""
+    if len(series) == 0:
+        return series
     if how == "first":
         return series + (ref.iloc[0] - series.iloc[0])
-    # default: mean alignment
     return series + (ref.mean() - series.mean())
 
+# ----------------------- main ------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Plot ARIMAX projections for a region with chosen factors.")
     parser.add_argument("--region", default="SYDNEY - BLACKTOWN")
     parser.add_argument("--region_level", default="sa4_name", choices=['sa4_name','major_city'])
-    parser.add_argument("--order", type=parse_order, default=(1,0,1))
+    parser.add_argument("--order", type=parse_order3, default=(1,0,1),
+                        help="Non-seasonal order 'p,0,q' (default 1,0,1).")
+    parser.add_argument("--sorder", type=parse_sorder4, default=(0,0,0,0),
+                        help="Seasonal order 'P,D,Q,s' (e.g. '0,0,1,12').")
     parser.add_argument("--start_year", type=int, default=1995)
     parser.add_argument("--factors", nargs="+", default=["market","mining"])
     parser.add_argument("--align", choices=["mean","first"], default="mean",
@@ -110,6 +124,9 @@ def main():
     warnings.filterwarnings("ignore", message="No frequency information was provided")
     warnings.filterwarnings("ignore", message="Maximum Likelihood optimization failed to converge")
     warnings.filterwarnings("ignore", message="Non-invertible starting MA parameters found")
+    warnings.filterwarnings("ignore", message="Non-stationary starting autoregressive parameters found")
+    warnings.filterwarnings("ignore", message="Non-invertible starting seasonal moving average")
+    warnings.filterwarnings("ignore", message="Non-stationary starting seasonal autoregressive")
 
     # --- Load
     idx_path = os.path.join(DATA_PATH, "city_indexes.csv" if args.region_level=='major_city' else "sa4_indexes.csv")
@@ -126,18 +143,18 @@ def main():
         if c not in df_fac.columns:
             raise ValueError(f"Column '{c}' missing in {fac_path}.")
 
+    # Trim & align
     df_idx = df_idx[df_idx.index >= f"{args.start_year}-01-01"]
     df_fac = df_fac[df_fac.index >= f"{args.start_year}-01-01"]
-
     y = ensure_monthly_freq(df_idx[args.region].astype(float).dropna())
     X = ensure_monthly_freq(df_fac[args.factors].astype(float).dropna())
     common = y.index.intersection(X.index)
     y, X = y.loc[common], X.loc[common]
 
-    # --- Fit
-    res = fit_arimax_levels(y, X, order=args.order)
+    # --- Fit (non-seasonal + optional seasonal) ------------------------------
+    res = fit_arimax(y, X, order=args.order, sorder=args.sorder)
 
-    # --- Parameters & intercept
+    # --- Parameters & intercept ----------------------------------------------
     param_names = getattr(res, "param_names", None)
     params = (pd.Series(res.params, index=param_names)
               if param_names is not None else pd.Series(res.params))
@@ -145,10 +162,10 @@ def main():
     beta_exog = params.reindex(exog_names)
 
     int_key = next((k for k in params.index
-                    if k and (("intercept" in k.lower()) or (k.lower()=="const"))), None)
+                    if isinstance(k, str) and (("intercept" in k.lower()) or (k.lower()=="const"))), None)
     intercept = float(params[int_key]) if int_key is not None else 0.0
 
-    # --- Deterministic components (no ARMA), then base-align to y
+    # --- Deterministic components (no ARMA), then base-align to y ------------
     def det_component(cols):
         cols = [c for c in cols if c in exog_names]
         b = beta_exog.reindex(cols).fillna(0.0)
@@ -170,32 +187,31 @@ def main():
         s3 = det_component(['market','mining','lifestyle'])
         comp_raw.append(s3); comp_labels.append("Market + Mining + Lifestyle")
 
-    # alignment
     comp_lines = [align_to_reference(s, y, how=args.align) for s in comp_raw]
 
-    # Full fitted values (with ARMA)
+    # Full fitted values (with ARMA & seasonality)
     y_fitted = res.fittedvalues
 
-    # --- Diagnostics
+    # --- Diagnostics ----------------------------------------------------------
     lb = lb_report(res.resid)
     kparams = res.params.size
     print(f"\n=== ARIMAX (levels, factors={args.factors}) ===")
-    print(f"Order: {args.order} | AIC: {res.aic:.3f} | AICc: {aicc(res.aic, res.nobs, kparams):.3f}")
+    print(f"Order: {args.order} | Seasonal: {args.sorder} | AIC: {res.aic:.3f} | AICc: {aicc(res.aic, res.nobs, kparams):.3f}")
     print(f"Intercept: {intercept:.6f}")
     print("Betas (exogenous):")
     print(beta_exog)
     print("Ljung–Box p-values:", lb)
 
-    # --- Plot
+    # --- Plot -----------------------------------------------------------------
     plt.close()
     fig, ax = plt.subplots(figsize=(10, 4.2))
     ax.plot(y.index, y.values, lw=2, label=f"{args.region} (actual)")
     for s, lab in zip(comp_lines, comp_labels):
         ax.plot(s.index, s.values, lw=2, label=lab + " (aligned)")
     ax.plot(y_fitted.index, y_fitted.values, lw=2, alpha=0.9,
-            label=f"ARMAX fitted (order {args.order})")
+            label=f"ARMAX fitted (order {args.order}, seasonal {args.sorder})")
 
-    ax.set_title(f"{args.region} — ARMAX (levels) — factors={args.factors} — order={args.order} — align={args.align}")
+    ax.set_title(f"{args.region} — ARMAX (levels) — factors={args.factors} — order={args.order} — sorder={args.sorder} — align={args.align}", fontsize=8)
     ax.set_xlabel("Time")
     ax.set_ylabel("Index level (log units)")
     ax.grid(True, linestyle="--", alpha=0.5)
