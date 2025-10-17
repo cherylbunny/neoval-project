@@ -2,19 +2,19 @@
 """
 Compare ARIMAX with/without Lifestyle across major cities and output a plain LaTeX tabular.
 
-Kept options (everything else removed):
+Behavior of order selection:
+- If --sorder is given but --order is not, we grid-search non-seasonal (p,q) with seasonal order fixed to --sorder.
+- If both --order and --sorder are given, both specs use those fixed orders.
+- If neither is given, we grid-search non-seasonal (p,q) with seasonal=(0,0,0,0), as before.
+
+Kept options:
 - --cities: which major cities to run
 - --order p,0,q: fixed non-seasonal order for BOTH specs (default: auto grid if omitted)
 - --sorder P,D,Q,s: fixed seasonal order for BOTH specs (default: 0,0,0,0 if omitted)
 - --rule_aicc: include Lifestyle if ΔAICc (3f-2f) <= rule_aicc (default -2.0)
-- --rule_lbmin: require LB p(12) for 3f >= rule_lbmin (default 0.05)
+- --rule_lbmin: LB adequacy flag uses LB p(12) ≥ rule_lbmin (default 0.05)
 - --start_year: sample start
-- --out: .tex output path
-
-Notes:
-- Factors are used as-is from df_factor_trends.csv (assumed centered).
-- Intercept is included (trend='c').
-- If neither --order nor --sorder is provided, each spec picks its own non-seasonal order from a small grid via AICc.
+- --coef_out: also print factor loadings (β_r, λ_r, γ_r)
 """
 
 import os
@@ -39,6 +39,13 @@ CITY_LIST_DEFAULT = [
     "GREATER HOBART",
     "GREATER DARWIN",
     "AUSTRALIAN CAPITAL TERRITORY",
+    "REST OF NSW",
+    "REST OF VIC.",
+    "REST OF QLD",
+    "REST OF WA",
+    "REST OF SA",
+    "REST OF TAS",
+    # "REST OF NT"
 ]
 
 # ----- Helpers -----
@@ -64,7 +71,7 @@ def parse_sorder4(s: str):
     except Exception:
         raise argparse.ArgumentTypeError("Seasonal order must be like '0,0,1,12'")
 
-# Small non-seasonal grid for levels
+# Small non-seasonal grid for levels (d=0)
 CAND_ORDERS_LEVELS = [
     (0,0,0),
     (1,0,0), (0,0,1), (1,0,1),
@@ -89,14 +96,14 @@ def fit_one(y: pd.Series, X: pd.DataFrame,
     lb12 = float(acorr_ljungbox(res.resid, lags=[12], return_df=True)['lb_pvalue'].iloc[0])
     return res, aicc_val, lb12
 
-def fit_best_nonseasonal(y: pd.Series, X: pd.DataFrame, trend='c'):
-    """Grid-search non-seasonal orders only; pick best by AICc."""
+def fit_best_nonseasonal(y: pd.Series, X: pd.DataFrame, trend='c', seasonal_order=(0,0,0,0)):
+    """Grid-search non-seasonal orders only; pick best by AICc, with seasonal_order held fixed."""
     best = None
     for od in CAND_ORDERS_LEVELS:
         try:
-            res, aiccv, lb12 = fit_one(y, X, order=od, seasonal_order=(0,0,0,0), trend=trend)
+            res, aiccv, lb12 = fit_one(y, X, order=od, seasonal_order=seasonal_order, trend=trend)
             if (best is None) or (aiccv < best['aicc']):
-                best = {'order': od, 'seasonal_order': (0,0,0,0), 'res': res, 'aicc': aiccv, 'lb12': lb12}
+                best = {'order': od, 'seasonal_order': seasonal_order, 'res': res, 'aicc': aiccv, 'lb12': lb12}
         except Exception:
             continue
     if best is None:
@@ -129,11 +136,9 @@ def region2label(region, remove_greater=True, max_components=3, max_len=50):
     return " - ".join(components).strip()
 
 def _fmt_city_list(cities):
-    # brief, readable
     return ", ".join([c.replace("AUSTRALIAN CAPITAL TERRITORY","ACT").replace("GREATER ","") for c in cities])
 
 def print_run_summary(args, df_idx):
-    # sample window after trimming
     if len(df_idx.index):
         start = df_idx.index.min().strftime("%Y-%m")
         end   = df_idx.index.max().strftime("%Y-%m")
@@ -146,10 +151,11 @@ def print_run_summary(args, df_idx):
     print(f"Cities: {_fmt_city_list(args.cities)}")
     print(f"Sample: {sample}")
     print(f"Orders: non-seasonal={nonseas}, seasonal={seas}")
-    print(f"Decision rule: include Lifestyle if ΔAICc ≤ {args.rule_aicc:.2f} and LB p(12) ≥ {args.rule_lbmin:.2f}.")
+    print(f"Decision rule: Use L = 'Yes' iff ΔAICc ≤ {args.rule_aicc:.2f}.  "
+          f"LB adequacy: add superscript * if LB p(12) ≥ {args.rule_lbmin:.2f}.")
     print("Notes: AICc is AIC with a small-sample penalty; smaller is better.")
     print("       ΔAICc = AICc(3f) − AICc(2f); negative values favor the 3-factor model.")
-    print("       LB p(12) is the Ljung–Box p-value at lag 12 on residuals; higher p ⇒ whiter residuals.")
+    print("       The * marker does NOT change the decision; it flags residual whiteness for the 3-factor model.")
     print("       Each model includes an intercept (trend='c'). Exogenous sets: 2f=[market,mining], 3f=[market,mining,lifestyle].\n")
 
 # ----- Main -----
@@ -166,9 +172,9 @@ def main():
     parser.add_argument("--rule_aicc", type=float, default=-2.0,
                         help="Include Lifestyle if ΔAICc (3f-2f) <= this threshold (default -2).")
     parser.add_argument("--rule_lbmin", type=float, default=0.05,
-                        help="Include Lifestyle if LB p(12) for 3f >= this (default 0.05).")
-    parser.add_argument("--out", default=os.path.join(PAPER_PATH, "tables", "city_lifestyle_comparison.tex"),
-                        help="Output .tex path (simple tabular).")
+                        help="LB adequacy flag uses LB p(12) ≥ this (default 0.05).")
+    parser.add_argument("--coef_out", action="store_true", default=False,
+                        help="Also print factor loadings (β_r, λ_r, γ_r) from the 3-factor spec.")
     args = parser.parse_args()
 
     # Quiet common warnings
@@ -177,7 +183,8 @@ def main():
     warnings.filterwarnings("ignore", message="Non-invertible starting MA parameters found")
     warnings.filterwarnings("ignore", message="Non-stationary starting autoregressive parameters found")
     warnings.filterwarnings("ignore", message="Covariance of the parameters could not be estimated")
-    warnings.filterwarnings("ignore", message="Non-invertible starting seasonal moving average Using zeros as starting parameters.")
+    warnings.filterwarnings("ignore", message="Non-invertible starting seasonal moving average")
+    warnings.filterwarnings("ignore", message="Non-stationary starting seasonal autoregressive")
 
     # --- Load data ---
     idx_path = os.path.join(DATA_PATH, "city_indexes.csv")
@@ -204,6 +211,8 @@ def main():
             raise ValueError(f"Column '{c}' missing in {fac_path}.")
 
     rows = []
+    coef_rows = []  # for optional coefficient table
+
     for city in args.cities:
         if city not in df_idx.columns:
             print(f"[warn] City '{city}' not found in {idx_path}; skipping.")
@@ -220,28 +229,28 @@ def main():
 
         # Decide orders
         trend = 'c'
+        seas = args.sorder if args.sorder is not None else (0,0,0,0)
         try:
-            if (args.order is not None) or (args.sorder is not None):
-                nonseas = args.order if args.order is not None else (2,0,1)
-                seas    = args.sorder if args.sorder is not None else (0,0,0,0)
-                res2, aicc2, lb2 = fit_one(y, X2, order=nonseas, seasonal_order=seas, trend=trend)
-                res3, aicc3, lb3 = fit_one(y, X3, order=nonseas, seasonal_order=seas, trend=trend)
-                order2 = order3 = nonseas
+            if args.order is not None:
+                # Fixed p,q (and fixed seasonal if provided)
+                res2, aicc2, lb2 = fit_one(y, X2, order=args.order, seasonal_order=seas, trend=trend)
+                res3, aicc3, lb3 = fit_one(y, X3, order=args.order, seasonal_order=seas, trend=trend)
+                order2 = order3 = args.order
                 seas2 = seas3 = seas
             else:
-                best2 = fit_best_nonseasonal(y, X2, trend=trend)
+                # Search p,q; hold seasonal fixed to --sorder (or 0,0,0,0 if omitted)
+                best2 = fit_best_nonseasonal(y, X2, trend=trend, seasonal_order=seas)
+                best3 = fit_best_nonseasonal(y, X3, trend=trend, seasonal_order=seas)
                 order2, seas2 = best2['order'], best2['seasonal_order']
-                res2, aicc2, lb2 = best2['res'], best2['aicc'], best2['lb12']
-
-                best3 = fit_best_nonseasonal(y, X3, trend=trend)
                 order3, seas3 = best3['order'], best3['seasonal_order']
+                res2, aicc2, lb2 = best2['res'], best2['aicc'], best2['lb12']
                 res3, aicc3, lb3 = best3['res'], best3['aicc'], best3['lb12']
 
         except Exception as e:
             print(f"[warn] Fitting failed for {city}: {e}")
             continue
 
-        # Debug print (3f spec): intercept & implied mean
+        # Robust param access for the 3f spec
         p3 = pd.Series(res3.params, index=getattr(res3, 'param_names', None)) \
              if getattr(res3, 'param_names', None) is not None else pd.Series(res3.params)
         int_key = next((k for k in p3.index if k and ('intercept' in k.lower() or k.lower()=='const')), None)
@@ -251,10 +260,15 @@ def main():
             print(f"{region2label(city, True, 2, 30)} | 2f {order2},{seas2} | 3f {order3},{seas3} | "
                   f"intercept={p3[int_key]:.6f}, sum(phi)={phi_sum:.3f}, implied mean={mu:.3f}")
 
-        # Decision
+        # Decision based on AICc only
         dAICc  = aicc3 - aicc2   # negative favors Lifestyle
-        beta_L = float(res3.params.get('lifestyle', np.nan))
-        use_L  = "Yes" if (dAICc <= args.rule_aicc and lb3 >= args.rule_lbmin) else "No"
+        gammaL = float(p3.get('lifestyle', np.nan))
+        use_AIC = (dAICc <= args.rule_aicc)
+        lb_ok = (lb3 >= args.rule_lbmin)
+
+        useL_str = "Yes" if use_AIC else "No"
+        if use_AIC and lb_ok:
+            useL_str = "Yes$^{\\ast}$"  # mark LB adequacy
 
         rows.append({
             "City": city,
@@ -263,36 +277,45 @@ def main():
             "dAICc": dAICc,
             "LB12 2f": lb2,
             "LB12 3f": lb3,
-            "beta L": beta_L,
-            "Use L": use_L,
+            "$\\gamma_r$": gammaL,
+            "Use L": useL_str,
+        })
+
+        # Coefficients table (from 3f spec)
+        coef_rows.append({
+            "City": city,
+            "$\\beta_r$": float(p3.get('market', np.nan)),
+            "$\\lambda_r$": float(p3.get('mining', np.nan)),
+            "$\\gamma_r$": float(p3.get('lifestyle', np.nan)),
         })
 
     if not rows:
         raise RuntimeError("No cities processed successfully; nothing to report.")
 
+    # ---------- Screening table ----------
     df = pd.DataFrame(rows).sort_values("dAICc")
-
-    # --- Formatting (no Styler/Jinja2 dependency beyond to_latex) ---
     df["AICc 2f"] = df["AICc 2f"].round(2)
     df["AICc 3f"] = df["AICc 3f"].round(2)
     df["dAICc"]   = df["dAICc"].round(2)
     df["LB12 2f"] = df["LB12 2f"].round(3)
     df["LB12 3f"] = df["LB12 3f"].round(3)
-    df["beta L"]  = df["beta L"].round(3)
+    df["$\\gamma_r$"]  = df["$\\gamma_r$"].round(3)
 
-    df = df[["City", "AICc 2f", "AICc 3f", "dAICc", "LB12 2f", "LB12 3f", "beta L", "Use L"]]
+    df = df[["City", "AICc 2f", "AICc 3f", "dAICc", "LB12 2f", "LB12 3f", "$\\gamma_r$", "Use L"]]
     df["City"] = df["City"].map(lambda x: region2label(x, remove_greater=True, max_components=2, max_len=30))
 
     fmt2 = lambda x: "" if pd.isna(x) else f"{x:.2f}"
-    fmt3 = lambda x: "" if pd.isna(x) else f"{x:.3f}"
+    fmt3 = lambda x: "" if pd.isna(x) else f"{x:.2f}"
     formatters = {
         "AICc 2f": fmt2,
         "AICc 3f": fmt2,
         "dAICc":   fmt2,
         "LB12 2f": fmt3,
         "LB12 3f": fmt3,
-        "beta L":  fmt3,
+        "$\\gamma_r$":  fmt3,
     }
+
+    df = df.sort_values("dAICc")
 
     try:
         latex = df.to_latex(
@@ -314,13 +337,49 @@ def main():
                  .replace("\\midrule\n", "")
                  .replace("\\bottomrule\n", ""))
 
-    out_path = args.out
-    os.makedirs(os.path.dirname(out_path), exist_ok=True)
-    with open(out_path, "w") as f:
-        f.write(latex)
+    print(f"\n{latex}\n")
+    print(f"[ok] LaTeX table generated for {len(df)} cities.")
+    print("Note: 'Yes$^{\\ast}$' indicates LB p(12) ≥ threshold; 'Yes' without * passes AICc but not LB.\n")
 
-    print(latex)
-    print(f"[ok] LaTeX table written to: {out_path}")
+    # ---------- Optional: loadings table (β_r, λ_r, γ_r) ----------
+    if args.coef_out:
+        dfc = pd.DataFrame(coef_rows)
+        dfc["City"] = dfc["City"].map(lambda x: region2label(x, remove_greater=True, max_components=2, max_len=30))
+        dfc = dfc[["City", "$\\beta_r$", "$\\lambda_r$", "$\\gamma_r$"]].copy()
+        dfc["$\\beta_r$"] = dfc["$\\beta_r$"].round(3)
+        dfc["$\\lambda_r$"] = dfc["$\\lambda_r$"].round(3)
+        dfc["$\\gamma_r$"] = dfc["$\\gamma_r$"].round(3)
+
+        formatters = {
+            "$\\beta_r$": fmt2,
+            "$\\lambda_r$": fmt2,
+            "$\\gamma_r$": fmt2,
+        }
+
+        dfc = dfc.sort_values("$\\beta_r$", ascending=False)
+
+        try:
+            latex2 = dfc.to_latex(
+                index=False,
+                escape=False,
+                formatters=formatters,
+                column_format="lrrr",
+                hrules=False,
+            )
+        except TypeError:
+            latex2 = dfc.to_latex(
+                index=False,
+                escape=False,
+                formatters=formatters,
+                column_format="lrrr",
+            )
+            latex2 = (latex2
+                      .replace("\\toprule\n", "")
+                      .replace("\\midrule\n", "")
+                      .replace("\\bottomrule\n", ""))
+
+        print(f"\n{latex2}\n")
+        print(f"[ok] Loadings table generated.")
 
 if __name__ == "__main__":
     main()
