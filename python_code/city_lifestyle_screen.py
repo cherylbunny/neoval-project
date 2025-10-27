@@ -2,19 +2,25 @@
 """
 Compare ARIMAX with/without Lifestyle across major cities and output a plain LaTeX tabular.
 
+New in this version:
+- Always prints a LaTeX "orders by city" table to stdout (for 3-factor spec).
+- Always writes a CSV with chosen 3-factor orders to data_out/arimax_orders_by_city.csv by default.
+  CSV columns: Region, p, d, q, P, D, Q, S (numeric), plus pretty strings for convenience.
+
 Behavior of order selection:
 - If --sorder is given but --order is not, we grid-search non-seasonal (p,q) with seasonal order fixed to --sorder.
 - If both --order and --sorder are given, both specs use those fixed orders.
-- If neither is given, we grid-search non-seasonal (p,q) with seasonal=(0,0,0,0), as before.
+- If neither is given, we grid-search non-seasonal (p,q) with seasonal=(0,0,0,0) (not recommended).
 
 Kept options:
 - --cities: which major cities to run
 - --order p,0,q: fixed non-seasonal order for BOTH specs (default: auto grid if omitted)
-- --sorder P,D,Q,s: fixed seasonal order for BOTH specs (default: 0,0,0,0 if omitted)
+- --sorder P,D,Q,s: fixed seasonal order for BOTH specs (default: 0,0,1,12)
 - --rule_aicc: include Lifestyle if ΔAICc (3f-2f) <= rule_aicc (default -2.0)
 - --rule_lbmin: LB adequacy flag uses LB p(12) ≥ rule_lbmin (default 0.05)
 - --start_year: sample start
 - --coef_out: also print factor loadings (β_r, λ_r, γ_r)
+- --orders_csv_out: override path for the orders CSV
 """
 
 import os
@@ -29,6 +35,7 @@ from statsmodels.stats.diagnostic import acorr_ljungbox
 HOME = os.path.expanduser("~")
 PAPER_PATH = os.path.join(HOME, "Documents/github/neoval-project")
 DATA_PATH  = os.path.join(PAPER_PATH, "data")
+DATA_OUT   = os.path.join(PAPER_PATH, "data_out")
 
 CITY_LIST_DEFAULT = [
     "GREATER SYDNEY",
@@ -151,7 +158,7 @@ def print_run_summary(args, df_idx):
     print(f"Cities: {_fmt_city_list(args.cities)}")
     print(f"Sample: {sample}")
     print(f"Orders: non-seasonal={nonseas}, seasonal={seas}")
-    print(f"Decision rule: Use L = 'Yes' iff ΔAICc ≤ {args.rule_aicc:.2f}.  "
+    print(f"Decision rule: Better = 'Yes' iff ΔAICc ≤ {args.rule_aicc:.2f}.  "
           f"LB adequacy: add superscript * if LB p(12) ≥ {args.rule_lbmin:.2f}.")
     print("Notes: AICc is AIC with a small-sample penalty; smaller is better.")
     print("       ΔAICc = AICc(3f) − AICc(2f); negative values favor the 3-factor model.")
@@ -165,7 +172,7 @@ def main():
                         help="City names as in city_indexes.csv.")
     parser.add_argument("--order", type=parse_order3, default=None,
                         help="Fixed non-seasonal order 'p,0,q' for BOTH specs (e.g., '2,0,1').")
-    parser.add_argument("--sorder", type=parse_sorder4, default=None,
+    parser.add_argument("--sorder", type=parse_sorder4, default=(0,0,1,12),
                         help="Fixed seasonal order 'P,D,Q,s' for BOTH specs (e.g., '0,0,1,12').")
     parser.add_argument("--start_year", type=int, default=1995,
                         help="Trim sample start (inclusive, year).")
@@ -175,7 +182,12 @@ def main():
                         help="LB adequacy flag uses LB p(12) ≥ this (default 0.05).")
     parser.add_argument("--coef_out", action="store_true", default=False,
                         help="Also print factor loadings (β_r, λ_r, γ_r) from the 3-factor spec.")
+    parser.add_argument("--orders_csv_out", default=os.path.join(DATA_OUT, "arimax_orders_by_city.csv"),
+                        help="Where to save the chosen orders CSV for 3-factor spec (default data_out/arimax_orders_by_city.csv).")
+
     args = parser.parse_args()
+
+    os.makedirs(DATA_OUT, exist_ok=True)
 
     # Quiet common warnings
     warnings.filterwarnings("ignore", message="No frequency information was provided")
@@ -185,6 +197,8 @@ def main():
     warnings.filterwarnings("ignore", message="Covariance of the parameters could not be estimated")
     warnings.filterwarnings("ignore", message="Non-invertible starting seasonal moving average")
     warnings.filterwarnings("ignore", message="Non-stationary starting seasonal autoregressive")
+
+    print("This script will also make the file containing the ARIMAX orders chosen per city for the 3-factor specification.")
 
     # --- Load data ---
     idx_path = os.path.join(DATA_PATH, "city_indexes.csv")
@@ -211,7 +225,8 @@ def main():
             raise ValueError(f"Column '{c}' missing in {fac_path}.")
 
     rows = []
-    coef_rows = []  # for optional coefficient table
+    coef_rows = []   # optional coefficient table
+    orders_rows = [] # NEW: per-city chosen orders for the 3-factor spec
 
     for city in args.cities:
         if city not in df_idx.columns:
@@ -253,12 +268,6 @@ def main():
         # Robust param access for the 3f spec
         p3 = pd.Series(res3.params, index=getattr(res3, 'param_names', None)) \
              if getattr(res3, 'param_names', None) is not None else pd.Series(res3.params)
-        int_key = next((k for k in p3.index if k and ('intercept' in k.lower() or k.lower()=='const')), None)
-        phi_sum = float(getattr(res3, 'arparams', np.array([])).sum()) if hasattr(res3,'arparams') else 0.0
-        if int_key:
-            mu = float(p3[int_key]) / (1.0 - phi_sum) if abs(1.0 - phi_sum) > 1e-8 else np.nan
-            print(f"{region2label(city, True, 2, 30)} | 2f {order2},{seas2} | 3f {order3},{seas3} | "
-                  f"intercept={p3[int_key]:.6f}, sum(phi)={phi_sum:.3f}, implied mean={mu:.3f}")
 
         # Decision based on AICc only
         dAICc  = aicc3 - aicc2   # negative favors Lifestyle
@@ -278,7 +287,7 @@ def main():
             "LB12 2f": lb2,
             "LB12 3f": lb3,
             "$\\gamma_r$": gammaL,
-            "Use L": useL_str,
+            "Better": useL_str,
         })
 
         # Coefficients table (from 3f spec)
@@ -289,10 +298,34 @@ def main():
             "$\\gamma_r$": float(p3.get('lifestyle', np.nan)),
         })
 
+        # NEW: Orders table row (for 3f spec)
+        region_canonical = city  # canonical name (e.g., 'GREATER MELBOURNE', 'REST OF NSW', 'AUSTRALIAN CAPITAL TERRITORY')
+        region_pretty    = region2label(city, remove_greater=True, max_components=2, max_len=30)
+
+        p, d, q = int(order3[0]), int(order3[1]), int(order3[2])
+        P, D, Q, S = (int(seas3[0]), int(seas3[1]), int(seas3[2]),
+                      int(seas3[3]) if len(seas3) == 4 else 0)
+
+        orders_rows.append({
+            # CSV will use this 'Region' (canonical, uppercase)
+            "Region": region_canonical,
+
+            # Keep a pretty label for the LaTeX printout only
+            "Region_pretty": region_pretty,
+
+            # human-readable forms (for LaTeX print)
+            "ARIMA(p,d,q)": f"({p},{d},{q})",
+            "Seasonal (P,D,Q)[s]": f"({P},{D},{Q})[{S}]",
+            # numeric fields for downstream usage
+            "p": p, "d": d, "q": q, "P": P, "D": D, "Q": Q, "S": S,
+            "k_factors": 3
+        })
+
+
     if not rows:
         raise RuntimeError("No cities processed successfully; nothing to report.")
 
-    # ---------- Screening table ----------
+    # ---------- Screening table (unchanged) ----------
     df = pd.DataFrame(rows).sort_values("dAICc")
     df["AICc 2f"] = df["AICc 2f"].round(2)
     df["AICc 3f"] = df["AICc 3f"].round(2)
@@ -301,7 +334,7 @@ def main():
     df["LB12 3f"] = df["LB12 3f"].round(3)
     df["$\\gamma_r$"]  = df["$\\gamma_r$"].round(3)
 
-    df = df[["City", "AICc 2f", "AICc 3f", "dAICc", "LB12 2f", "LB12 3f", "$\\gamma_r$", "Use L"]]
+    df = df[["City", "AICc 2f", "AICc 3f", "dAICc", "LB12 2f", "LB12 3f", "$\\gamma_r$", "Better"]]
     df["City"] = df["City"].map(lambda x: region2label(x, remove_greater=True, max_components=2, max_len=30))
 
     fmt2 = lambda x: "" if pd.isna(x) else f"{x:.2f}"
@@ -314,6 +347,8 @@ def main():
         "LB12 3f": fmt3,
         "$\\gamma_r$":  fmt3,
     }
+
+    df = df.drop("$\\gamma_r$", axis=1)
 
     df = df.sort_values("dAICc")
 
@@ -338,7 +373,7 @@ def main():
                  .replace("\\bottomrule\n", ""))
 
     print(f"\n{latex}\n")
-    print(f"[ok] LaTeX table generated for {len(df)} cities.")
+    print(f"[ok] LaTeX screening table generated for {len(df)} cities.")
     print("Note: 'Yes$^{\\ast}$' indicates LB p(12) ≥ threshold; 'Yes' without * passes AICc but not LB.\n")
 
     # ---------- Optional: loadings table (β_r, λ_r, γ_r) ----------
@@ -349,6 +384,7 @@ def main():
         dfc["$\\beta_r$"] = dfc["$\\beta_r$"].round(3)
         dfc["$\\lambda_r$"] = dfc["$\\lambda_r$"].round(3)
         dfc["$\\gamma_r$"] = dfc["$\\gamma_r$"].round(3)
+
 
         formatters = {
             "$\\beta_r$": fmt2,
@@ -379,7 +415,38 @@ def main():
                       .replace("\\bottomrule\n", ""))
 
         print(f"\n{latex2}\n")
-        print(f"[ok] Loadings table generated.")
+        print(f"[ok] Loadings table generated.\n")
+
+    # ---------- NEW: Orders-by-city table (stdout + CSV) ----------
+    if orders_rows:
+        odf = pd.DataFrame(orders_rows)
+
+        # --- LaTeX printout uses pretty names ---
+        odf_print = odf[["Region_pretty", "ARIMA(p,d,q)", "Seasonal (P,D,Q)[s]"]].copy()
+        odf_print = odf_print.rename(columns={"Region_pretty": "City"}).sort_values("City")
+
+        try:
+            latex_orders = odf_print.to_latex(
+                index=False, escape=False, column_format="lcc", hrules=False
+            )
+        except TypeError:
+            latex_orders = odf_print.to_latex(
+                index=False, escape=False, column_format="lcc"
+            )
+            latex_orders = (latex_orders
+                            .replace("\\toprule\n", "")
+                            .replace("\\midrule\n", "")
+                            .replace("\\bottomrule\n", ""))
+
+        print("\n" + latex_orders + "\n")
+        print("[ok] LaTeX ARIMAX orders table (3-factor spec) printed above.\n")
+
+        # --- CSV saves canonical names for downstream scripts ---
+        csv_cols = ["Region","p","d","q","P","D","Q","S","k_factors"]
+        odf_csv = odf[csv_cols].sort_values("Region").copy()
+        odf_csv.to_csv(args.orders_csv_out, index=False)
+        print(f"[ok] Saved 3-factor orders CSV to: {args.orders_csv_out}")
+
 
 if __name__ == "__main__":
     main()
