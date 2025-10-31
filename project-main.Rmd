@@ -38,13 +38,12 @@ library(patchwork)
 library(sf)
 library(distributional) 
 library(glue)
-library(readxl)
 library(GGally)
 library(zoo)
 library(strucchange)
 library(slider)
 library(glmnet)
-#library(plotly)
+library(lmtest)  
 ```
 
 ```{r load-clean-data}
@@ -52,10 +51,14 @@ library(glmnet)
 city_indexes <- read_csv("data/city_indexes.csv")
 sa4_indexes <- read_csv("data/sa4_indexes.csv")
 
-# PC proxy with identified characteristic
-factor_trends <- read_csv("data/df_factor_trends.csv")
+# PC proxy
+factor_trends <- read_csv("data/df_factor_trends.csv") 
+factor_trends <- factor_trends |> 
+  select(-lifestyle_melb_nsw) |> 
+  mutate(month_date = yearmonth(month_date)) |> 
+  as_tsibble(index = month_date)
 
-# Static regression coef 
+# Static regression coef - better do this regression yourself 
 reg_coefs <- read_csv("data/df_reg_coefs.csv") 
 
 # PC score and loadings
@@ -112,8 +115,6 @@ After defining the factors associated with each principal component (PC), we int
 
 * For PC3 proxy, the lifestyle spread (Melbourne-Rest of NSW spread, $\delta_{lifestyle}$), the factor model is specified as: \(\mu_r = \beta_r U + \lambda_r \delta_{PS} + \gamma_r \delta_{lifestyle} + \varepsilon\
 
-*Throughout our analysis, we recognise that the Lifestyle factor reflects important long-term behavioural influences, yet we exclude it from the main two-factor specification since its impact differs markedly across regions—improving model performance in lifestyle-driven areas like the Central Coast but diminishing it in neutral regions such as Blacktown. Accordingly, it is retained solely for comparison and illustrative discussion rather than as a key explanatory variable.*
-
 ### Forecasting of Factors
 
 Once the factor proxies were defined, we modelled each factor series separately using time series forecasting methods. The process included exploratory analysis, stationarity checks, and STL decomposition to characterise the data. Guided by these diagnostics, we selected suitable ARIMA-type models, enhancing them with Fourier terms to capture seasonality and intervention dummies to address structural breaks.
@@ -165,7 +166,7 @@ To illustrate this process, we compared two candidate combinations for represent
 
 Its scatterplot shows a tighter fit along the regression line, and the correlation with PC2 is marginally higher (98% versus 96% for the Brisbane–Sydney spread). Although the difference is small and not statistically significant, the Perth–Sydney spread provides the more robust proxy for PC2.
 
-```{r examine-pc2-spreads}
+```{r examine-pc2-spreads, eval = FALSE}
 # Compute the Perth Sydney Spread 
 PS_raw <- city_indexes |> 
   select(month_date, greater_sydney, greater_perth)
@@ -248,21 +249,12 @@ plot_ts
 
 # Exploratory Analysis 
 
-The exploratory analysis utilises visualisations to characterise the dynamics of the national trend (U) and the Perth–Sydney spread (δPS), thereby clarifying their underlying properties.
+The exploratory analysis utilises visualisations to characterise the dynamics of the National trend and the Mining trend, thereby clarifying their underlying properties.
 
 ```{r autoplot}
-# Transform df to tsibble
-factor_trend_ts <- factor_trends |>
-  transmute(
-    month_date = yearmonth(as.Date(month_date)),
-    U = as.numeric(market),
-    PS = as.numeric(mining_ps)
-  ) |>
-  as_tsibble(index = month_date)
-
 # Time-series autoplot
-p1 <- factor_trend_ts |> autoplot(U) + labs(title = "U: National Trend", x = "Month", y = "Index")
-p2 <- factor_trend_ts |> autoplot(PS) + labs(title = "δPS: Perth–Sydney Spread", x = "Month", y = "Index")
+p1 <- factor_trends |> autoplot(market) + labs(title = "National Sprend", x = "Month", y = "Index")
+p2 <- factor_trends |> autoplot(mining) + labs(title = "Mining Spread", x = "Month", y = "Index")
 
 p1 + p2 
 ```
@@ -275,8 +267,8 @@ p1 + p2
 
 ```{r season-plot}
 # Seasonal plots
-p3  <- factor_trend_ts |> gg_season(U) + labs(title = "Seasonal Plot: U", x = "Month", y = "Index")
-p4 <- factor_trend_ts |> gg_season(PS) + labs(title = "Seasonal Plot: δPS", x = "Month", y = "Index")
+p3  <- factor_trends |> gg_season(market) + labs(title = "Seasonal Plot: Market", x = "Month", y = "Index")
+p4 <- factor_trends |> gg_season(mining) + labs(title = "Seasonal Plot: Mining", x = "Month", y = "Index")
 p3 + p4
 ```
 
@@ -288,8 +280,8 @@ p3 + p4
 
 ```{r subseries-plot}
 # Seasonal subseries
-p5 <- factor_trend_ts |> gg_subseries(U) + labs(title = "Seasonal Subseries: U", x = "Month", y = "Index")
-p6 <- factor_trend_ts |> gg_subseries(PS) + labs(title = "Seasonal Subseries: δPS", x = "Month", y = "Index")
+p5 <- factor_trends |> gg_subseries(market) + labs(title = "Seasonal Subseries: Market", x = "Month", y = "Index")
+p6 <- factor_trends |> gg_subseries(mining) + labs(title = "Seasonal Subseries: Mining", x = "Month", y = "Index")
 p5 + p6
 ```
 
@@ -303,30 +295,17 @@ p5 + p6
 
 With the factors now established, we proceed to fit time series forecasting models to each series individually. As a first step, we examine the series in more detail. STL decomposition plots allow us to closely inspect the trend, seasonality, and remainder components, which helps determine the most suitable forecasting models for the series’ characteristics.
 
-Stationary tests (ADF and KPSS) indicate that both the national index (U) and the Perth–Sydney spread (PS) are non-stationary, so differencing is required. However, based on economic intuition that the PS series may be mean-reverting, we applied the Zivot–Andrews (ur.za) test. This confirmed that PS could be stationary with several structural break.
+Stationary tests (ADF and KPSS) indicate that both the market index (U) and the Perth–Sydney spread (PS) are non-stationary, so differencing is required. However, based on economic intuition that the PS series may be mean-reverting, we applied the Zivot–Andrews (ur.za) test. This confirmed that PS could be stationary with several structural break.
 
 The dataset was partitioned into training and testing subsets, with one year of observations allocated to the testing set. Given that the data are recorded at a monthly frequency and span only 25 years, this allocation represents an optimal balance between ensuring sufficient data for model training while preserving an adequate sample for evaluation.
 
-```{r trans-ts}
-# Transform df to tsibble 
-factor_trends_ts <- factor_trends |>
-  transmute(date = yearmonth(month_date),
-            U  = market,
-            PS = mining) |> 
-  as_tsibble(index = date) 
-```
-
 ```{r stationary-test, eval = FALSE}
-# U is non stationary, I(1)
-adf_U <- ur.df(factor_trends_ts$U, type="trend", lags=12)
-kpss_U <- kpss.test(factor_trends_ts$U, null="Trend")
-
 # PS also I(1)
-adf_PS <- ur.df(factor_trends_ts$PS, type="drift", lags=12) 
-kpss_PS <- kpss.test(factor_trends_ts$PS, null="Level")
+ur.df(factor_trends$mining, type="drift", lags=12) 
+kpss.test(factor_trends$mining, null="Level")
 
-# PS is stationary with a single structural break at position 53: 2011 Apr
-za <- ur.za(factor_trends_ts$PS, model = "both") 
+# PS is stationary with a single structural break
+ur.za(factor_trends$mining, model = "both") 
 ```
 
 ## National Trend 
@@ -335,24 +314,24 @@ The STL decomposition of the national trend U reveals a smooth and persistent up
 
 ```{r fitting-u-plot}
 # Identify fits 
-U_stl <- factor_trends_ts |> 
-  model(stl = STL(U))
+mkt_stl <- factor_trends |> 
+  model(stl = STL(market))
 
-U_stl |> 
+mkt_stl |> 
   components() |> 
   autoplot() +
-  labs(title = "STL Decomposition of National Trend U")
+  labs(title = "STL Decomposition of Market Trend")
 
-ggtsdisplay(factor_trends_ts$U, main = "ACF and PACF with National Trend U")
+ggtsdisplay(factor_trends$market, main = "ACF and PACF with National Trend U")
 
 # Split testing and training 
-train_U <- factor_trends_ts |> 
-  select(U, date) |> 
-  filter(date < yearmonth("2023 Jan")) 
+train_mkt <- factor_trends |> 
+  select(market, month_date) |> 
+  filter(month_date < yearmonth("2023 Jan")) 
 
-test_U <- factor_trends_ts |> 
-  select(U, date) |> 
-  filter(date >= yearmonth("2023 Jan")) 
+test_mkt <- factor_trends |> 
+  select(market, month_date) |> 
+  filter(month_date >= yearmonth("2023 Jan")) 
 ```
 
 The modelling strategy was guided by exploratory data analysis and the STL decomposition, which suggested a random walk with drift, `ARIMA(U ∼ pdq(0,1,0))`, as an appropriate baseline specification. 
@@ -367,40 +346,42 @@ In the modelling process, we evaluated a range of specifications informed both b
 * Model fit: Among the fitted models, two candidates emerged as particularly strong. The first, an ARIMA(1,1,0) with Fourier terms (K = 2) and drift. A second competitive specification combined Fourier terms (K = 2) with intervention dummies (step and pulse) and an ARIMA(2,1,1) structure. The table below presents the model fits, ranked according to their AICc values.
 
 ```{r fit-u-model}
-# Function to add knots - improvement can be done by examining the mining expenditure data 
+# Function to add knots
 add_pw <- function(df) {
-  df |> 
+  df |>
     mutate(
-      ym = yearmonth(date),
-      # steps
-      step2008 = as.integer(date >= yearmonth("2008 Jan")), #step 
-      step2012 = as.integer(date >= yearmonth("2012 Jan")),
-      ramp2020 = pmax(0L, as.integer(yearmonth(date) - yearmonth("2020 Mar"))), #ramp 
-      step2020_03  = as.integer(date >= yearmonth("2020 Mar")),
-      pulse2020_04 = as.integer(date ==  yearmonth("2020 Apr")) #pulse 
-    ) |> 
+      ym = yearmonth(month_date),
+      # step dummies
+      step2008 = as.integer(ym >= yearmonth("2008 Jan")),
+      step2012 = as.integer(ym >= yearmonth("2012 Jan")),
+      step2020_03 = as.integer(ym >= yearmonth("2020 Mar")),
+      # ramp: months since Mar 2020 
+      ramp2020 = pmax(0L, as.integer(ym - yearmonth("2020 Mar"))),
+      # pulse: only in Apr 2020
+      pulse2020_04 = as.integer(ym == yearmonth("2020 Apr"))
+    ) |>
     select(-ym)
 }
 
-train_U <- train_U |>
-  as_tsibble(index = date) |>
+train_mkt <- train_mkt |>
+  as_tsibble(index = month_date) |>
   add_pw()
 
 # Fit models 
-fit_U <- train_U |> 
+fit_mkt <- train_mkt |> 
   model(
-    autoarima = ARIMA(U),
-    rw_drift  = ARIMA(U ~ 1 + pdq(0,1,0)),
-    arima211  = ARIMA(U ~ 1 + fourier(K = 2) + pdq(2,1,1)),
-    arima110  = ARIMA(U ~ 1 + fourier(K = 2) + pdq(1,1,0)),
-    arima111  = ARIMA(U ~ 1 + fourier(K = 2) + pdq(1,1,1)),
-    sarima211 = ARIMA(U ~ 1 + pdq(2,1,1) + PDQ(1,0,0)),
-    piece = ARIMA(U ~ 1 + pdq(1,1,1) + step2008 + step2012 + ramp2020),
-    step = ARIMA(U ~ fourier(K = 2) + step2020_03 + pulse2020_04 + pdq(2,1,1))
+    autoarima = ARIMA(market),
+    rw_drift  = ARIMA(market ~ 1 + pdq(0,1,0)),
+    arima211  = ARIMA(market ~ 1 + fourier(K = 2) + pdq(2,1,1)),
+    arima110  = ARIMA(market ~ 1 + fourier(K = 2) + pdq(1,1,0)),
+    arima111  = ARIMA(market ~ 1 + fourier(K = 2) + pdq(1,1,1)),
+    sarima211 = ARIMA(market ~ 1 + pdq(2,1,1) + PDQ(1,0,0)),
+    piecewise = ARIMA(market ~ 1 + pdq(1,1,1) + step2008 + step2012 + ramp2020),
+    step = ARIMA(market ~ fourier(K = 2) + step2020_03 + pulse2020_04 + pdq(2,1,1))
   ) 
 
 # Examine fit  
-glance(fit_U) |> arrange(AICc)
+glance(fit_mkt) |> arrange(AICc)
 ```
 
 * Residual diagnostics: After adjusting for model-specific degrees of freedom, all models fall short on the Ljung-Box test, indicating residual autocorrelation to varying degrees. At this stage, we accept that some autocorrelation will remain because:
@@ -425,22 +406,40 @@ We ultimately select **ARIMA(1,1,0)** as the preferred model because:
 
 ```{r fit-u-model-residual-test}
 # Residual diagnostics for best model
-fit_U |> 
+fit_mkt |> 
   select(arima110) |>
   gg_tsresiduals() + 
   ggtitle("Residual Diagnostics for ARIMA(1,1,0)",
           subtitle = "Model fit on Market factor shows mild autocorrelation")
 
-fit_long <- fit_U |>
+fit_mktlong <- fit_mkt |>
   pivot_longer(cols = everything(), names_to = "model_name", values_to = "model_fit")
 
 dof_lookup <- tibble(
-  model_name = c("autoarima", "rw_drift", "arima211", "arima110", "arima111", "sarima211", "piece", "step"),
-  dof = c(NA_integer_, 0, 3, 1, 2, 4, 2, 3)
+  model_name = c(
+    "autoarima",
+    "rw_drift",
+    "arima211",
+    "arima110",
+    "arima111",
+    "sarima211",
+    "piecewise",
+    "step"
+  ),
+  dof = c(
+    NA_integer_,  # autoarima depends on chosen (p,q)
+    0,  # rw_drift
+    7,  # arima211 (p+q=3, fourier=4)
+    5,  # arima110 (p+q=1, fourier=4)
+    6,  # arima111 (p+q=2, fourier=4)
+    4,  # sarima211 (p+q+P+Q=4)
+    5,  # piecewise (p+q=2, 3 exogenous dummies)
+    9   # step (p+q=3, 6 exogenous regressors)
+  )
 )
 
 # Extract model dof 
-lb_tbl_u <- fit_long |>
+lb_tbl_mkt <- fit_mktlong |>
   left_join(dof_lookup, by = "model_name") |>
   mutate(
     lb_test = map2(model_fit, dof, ~{
@@ -452,8 +451,9 @@ lb_tbl_u <- fit_long |>
   mutate(lb_pvalue = format(lb_pvalue, scientific = FALSE, digits = 2)) |> 
   select(model_name, lb_stat, lb_pvalue) |>
   arrange(desc(lb_pvalue)) 
+lb_tbl_mkt
 
-kable(lb_tbl_u, caption = "Ljung-Box Test Results for Model Residual on Market factor") 
+kable(lb_tbl_mkt, caption = "Ljung-Box Test Results for Model Residual on Market factor") 
 ```
 
 ## Mining Trend 
@@ -461,26 +461,24 @@ kable(lb_tbl_u, caption = "Ljung-Box Test Results for Model Residual on Market f
 The mining trend (PS) oscillates around zero and appears mean-reverting with no evidence ofpermanent trend. Seasonality is present but relatively stable across years, while longer multi-year swings suggest the need for more flexible seasonal modelling. The residuals still display structure, with a clear AR(1) cut-off rather than pure white noise. 
 
 ```{r fit-ps-plot}
-PS_stl <- factor_trends_ts |> 
-  model(stl = STL(PS))
+mining_stl <- factor_trends |> 
+  model(stl = STL(mining))
 
-PS_stl |> 
+mining_stl |> 
   components() |> 
   autoplot() +
   labs(title = "STL Decomposition of Mining Trend PS")
 
-ggtsdisplay(factor_trends_ts$PS, main = "ACF and PACF with Mining Trend PS")
+ggtsdisplay(factor_trends$mining, main = "ACF and PACF with Mining Trend PS")
 
 # Split training and testing set 
-train_PS <- factor_trends_ts |>
-  select(date, PS) |>
-  filter(date < yearmonth("2023 Jan")) |>
-  as_tsibble(index = date)
+train_mining <- factor_trends |>
+  select(month_date, mining) |>
+  filter(month_date < yearmonth("2023 Jan")) 
 
-test_PS <- factor_trends_ts |> 
-  select(date, PS) |>
-  filter(date >= yearmonth("2023 Jan")) |>
-  as_tsibble(index = date)
+test_mining <- factor_trends |> 
+  select(month_date, mining) |>
+  filter(month_date >= yearmonth("2023 Jan")) 
 ```
 
 **Modelling process:**
@@ -492,16 +490,8 @@ To address this, we treat the boom as a temporary structural shock. We introduce
 The boom and decline phases were identified using the `breakpoints` function from the `strucchange` package, which detected three structural breaks in the series. The segment containing the global peak was classified as the “boom” period, followed by the “decline” period. These periods were then encoded into dummy variables for use in the modelling process, essentially fitting an ARIMA model to the residuals after accounting for the boom and decline periods. 
 
 ```{r detect-ps-break}
-ps_df <- train_PS |> 
-  as_tibble() |> 
-  transmute(
-    date = as.Date(date),    
-    PS = as.numeric(PS)   
-  ) |> 
-  arrange(date)
-
 # Partition the series into boom and decline windows based on structural breaks
-ps_zoo <- zoo(ps_df$PS, order.by = ps_df$date)
+ps_zoo <- zoo(factor_trends$mining, order.by = factor_trends$month_date)
 y  <- coredata(ps_zoo)
 ti <- index(ps_zoo)
 n  <- length(y)
@@ -527,20 +517,21 @@ decline_start <- boom_end
 decline_end <- ti[cuts[pmin(seg_id + 2, length(cuts))]]
 
 # Create dummies
-ps_df <- ps_df |> 
+mining_df <- factor_trends |> 
+  select(month_date, mining) |> 
   mutate(
-    boom_dummy = as.integer(date >= boom_start & date <= boom_end),
-    decline_dummy = as.integer(date > decline_start & date <= decline_end)
-  )
+    boom_dummy = as.integer(month_date >= boom_start & month_date <= boom_end),
+    decline_dummy = as.integer(month_date > decline_start & month_date <= decline_end))
+
 
 # Fitted piecewise trend for visual check
 fit_tr <- fitted(bp_tr, breaks = length(idx))
 
 # Plot 
-ggplot(ps_df, aes(date, PS)) +
+ggplot(mining_df, aes(month_date, mining)) +
   geom_line(colour = "black") +
   geom_line(aes(y = as.numeric(fit_tr)), colour = "red", linewidth = 0.5) +
-  geom_vline(xintercept = ti[idx], linetype = 2, colour = "blue") +
+  geom_vline(xintercept = as.Date(ti[idx]), linetype = 2, colour = "blue") +
   annotate("rect", xmin = boom_start, xmax = boom_end, ymin = -Inf, ymax = Inf,
            alpha = 0.12, fill = "forestgreen") +
   annotate("rect", xmin = decline_start, xmax = decline_end, ymin = -Inf, ymax = Inf,
@@ -563,10 +554,10 @@ decline_start <- yearmonth(decline_start)
 decline_end <- yearmonth(decline_end)
 
 # Add in dummies for mining boom and decline periods
-train_PS <- train_PS |> 
+train_mining <- train_mining |> 
   mutate(
-    boom = as.integer(date >= boom_start & date <= boom_end),
-    decline = as.integer(date >= decline_start & date <= decline_end)
+    boom = as.integer(month_date >= boom_start & month_date <= boom_end),
+    decline = as.integer(month_date >= decline_start & month_date <= decline_end)
   )
 ```
 
@@ -582,28 +573,28 @@ train_PS <- train_PS |>
 
 ```{r fit-ps-model}
 # Fit ARIMA with residuals after accounting for the dummies 
-fit_PS <- train_PS |>
+fit_mining <- train_mining |>
   model(
-    arima201 = ARIMA(PS ~ boom + decline + pdq(2,0,1)), 
-    arima100 = ARIMA(PS ~ boom + decline + pdq(1,0,0)),
-    arima200 = ARIMA(PS ~ boom + decline + pdq(2,0,0)),
-    arima101 = ARIMA(PS ~ boom + decline + pdq(1,0,1))
+    arima201 = ARIMA(mining ~ boom + decline + pdq(2,0,1)), 
+    arima100 = ARIMA(mining ~ boom + decline + pdq(1,0,0)),
+    arima200 = ARIMA(mining ~ boom + decline + pdq(2,0,0)),
+    arima101 = ARIMA(mining ~ boom + decline + pdq(1,0,1))
   ) |> 
   select(arima201)
 
-glance(fit_PS) |> arrange(AICc) 
+glance(fit_mining) |> arrange(AICc) 
 
-fit_PS |> 
+fit_mining |> 
   select(arima201) |> 
   gg_tsresiduals() + 
   ggtitle("Residual Diagnostics for ARIMA(2,0,1)",
           subtitle = "Model fit on Mining factor shows no autocorrelation")
 
-lb_tbl_ps <- fit_PS |>
+lb_tbl_mining <- fit_mining |>
   augment() |>
   features(.innov, ljung_box, lag = 12, dof = 3)
 
-kable(lb_tbl_ps, caption = "Ljung-Box Test Results for Model Residual on Mining factor") 
+kable(lb_tbl_mining, caption = "Ljung-Box Test Results for Model Residual on Mining factor") 
 ```
 
 ## Forecast Performance 
@@ -612,106 +603,121 @@ For the forecasting stage, we use the best-performing models (ARIMA(1,1,0) with 
 
 For evaluation, we set aside one year of data (2023) as a test set. Although a typical split is about 20% of the dataset, our series only spans 29 years, so using 20% would cut off too much valuable information for forecasting. A one-year test period strikes a better balance.
 
-The forecasts indicate that the market trend is expected to rise, with an 80% prediction interval width of 0.9350, reflecting higher uncertainty. In contrast, the mining trend shows a flatter path, with an 80% interval width of 0.6106. This narrower range reflects greater stability, largely because we excluded the one-off boom and decline period, which would otherwise make the series more volatile.
+The forecasts indicate that the market trend is expected to rise, with an 80% prediction interval width of 0.9350, reflecting higher uncertainty. In contrast, the mining trend shows a flatter path, with an 80% interval width of 0.6107. This narrower range reflects greater stability, largely because we excluded the one-off boom and decline period, which would otherwise make the series more volatile.
 
 ```{r prediction-interval}
 # Forecast - 10 years
 h <- 120
-fit_U <- fit_U |> select(arima110)
-last_idx <- max(train_PS$date)  
-future_PS <- tibble(date = last_idx + (1:h), boom = 0L, decline = 0L) |> as_tsibble(index = date)
+fit_mkt <- fit_mkt |> select(arima110)
+last_idx <- max(train_mining$month_date)  
+future_mining <- tibble(
+  month_date = last_idx + (1:h),
+  boom = 0L,
+  decline = 0L
+) |> 
+  as_tsibble(index = month_date)
 
-fc_U  <- fabletools::forecast(fit_U,  h = h, level = c(80, 95))
-fc_PS <- fabletools::forecast(fit_PS, new_data = future_PS , h = h, level = c(80, 95))
+fc_mkt  <- fabletools::forecast(fit_mkt,  h = h, level = c(80, 95))
+fc_mining <- fabletools::forecast(fit_mining, new_data = future_mining , h = h, level = c(80, 95))
 
 # Produce fan with for U 
-fcbands_U <- fc_U |> 
+fcbands_mkt <- fc_mkt |> 
   as_tibble() |> 
   mutate(
-    lo80 = quantile(U, 0.10),
-    hi80 = quantile(U, 0.90),
-    lo95 = quantile(U, 0.025),
-    hi95 = quantile(U, 0.975),
+    lo80 = quantile(market, 0.10),
+    hi80 = quantile(market, 0.90),
+    lo95 = quantile(market, 0.025),
+    hi95 = quantile(market, 0.975),
     width80 = hi80 - lo80,
     width95 = hi95 - lo95
   ) |> 
-  select(.model, date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
+  select(.model, month_date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
 
-last_row_U <- fcbands_U |> filter(date == max(date))
+last_row_mkt <- fcbands_mkt |> filter(month_date == max(month_date))
 
 # Forecast plot with fan width at last obs 
-autoplot(fc_U, factor_trends_ts) +
-  geom_segment(data = last_row_U,
-               aes(x = date, xend = date, y = lo80, yend = hi80, colour = .model),
-               linewidth = 0.8) +
-  geom_text(data = last_row_U,
-            aes(x = date, y = hi80,
-                label = sprintf("w80 = %.4f", width80),
-                colour = .model),
-            vjust = -0.6, size = 2.5) + 
-  labs(title = "Forecasts of National Trend U with 80% Prediction Interval",
-       subtitle = "The forecasts show a rising trend with wider prediction intervals")
+autoplot(
+  fc_mkt,
+  data = factor_trends |> 
+    filter(month_date <= max(train_mkt$month_date))
+) +
+  geom_segment(
+    data = last_row_mkt,
+    aes(x = month_date, xend = month_date, y = lo80, yend = hi80, colour = .model),
+    linewidth = 0.8
+  ) +
+  geom_text(
+    data = last_row_mkt,
+    aes(x = month_date, y = hi80, label = sprintf("w80 = %.4f", width80), colour = .model),
+    vjust = -0.6, size = 2.5
+  ) +
+  labs(
+    title = "Forecasts of Market Trend with 80% Prediction Interval",
+    subtitle = "The forecasts start after the training window and show widening uncertainty bands"
+  )
 
-# Produce fan width for PS 
-fcbands_PS <- fc_PS  |> 
+# Produce fan width for mining 
+fcbands_mining <- fc_mining  |> 
   as_tibble() |> 
   mutate(
-    lo80 = quantile(PS, 0.10),
-    hi80 = quantile(PS, 0.90),
-    lo95 = quantile(PS, 0.025),
-    hi95 = quantile(PS, 0.975),
+    lo80 = quantile(mining, 0.10),
+    hi80 = quantile(mining, 0.90),
+    lo95 = quantile(mining, 0.025),
+    hi95 = quantile(mining, 0.975),
     width80 = hi80 - lo80,
     width95 = hi95 - lo95
   ) |> 
-  select(.model, date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
+  select(.model, month_date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
 
-last_row_PS <- fcbands_PS |> filter(date == max(date))
+last_row_mining <- fcbands_mining |> filter(month_date == max(month_date))
 
-autoplot(fc_PS, factor_trends_ts) +
-  geom_segment(data = last_row_PS,
-               aes(x = date, xend = date, y = lo80, yend = hi80, colour = .model),
+autoplot(fc_mining, 
+         data = factor_trends |> 
+           filter(month_date <= max(train_mining$month_date))) +
+  geom_segment(data = last_row_mining,
+               aes(x = month_date, xend = month_date, y = lo80, yend = hi80, colour = .model),
                linewidth = 0.8) +
-  geom_text(data = last_row_PS,
-            aes(x = date, y = hi80,
+  geom_text(data = last_row_mining,
+            aes(x = month_date, y = hi80,
                 label = sprintf("w80 = %.4f", width80),
                 colour = .model),
             vjust = -0.6, size = 2.5) + 
-  labs(title = "Forecasts of Mining Trend δPS with 80% Prediction Interval",
+  labs(title = "Forecasts of Mining Trend with 80% Prediction Interval",
        subtitle = "Excluding the boom/decline period produces more stable forecasts")
 ```
 
 The test results show that the chosen model for the market trend performs well, with low error (RMSE = 0.056, small relative to the series scale). For the mining trend, the model with boom and decline dummies yields forecasts with an average error of about 7%, which is reasonable given the mining factor’s higher volatility and cyclical nature. Despite minor residual autocorrelation, both models perform robustly overall.
 
 ```{r test-set-performance}
-acc_U <- accuracy(fc_U, test_U) |>
+acc_mkt <- accuracy(fc_mkt, test_mkt) |>
   select(.model, .type, RMSE, MAE)
 
-acc_PS <- accuracy(fc_PS, test_PS) |>
+acc_mining <- accuracy(fc_mining, test_mining) |>
   select(.model, .type, RMSE, MAE)
 
 # Add labels
-acc_U  <- acc_U  |> mutate(series = "U (market)")
-acc_PS <- acc_PS |> mutate(series = "PS (mining)")
+acc_mkt  <- acc_mkt  |> mutate(series = "Market")
+acc_mining <- acc_mining |> mutate(series = "Mining")
 
 # Combine tables 
-acc_all <- bind_rows(acc_U, acc_PS) |>
+acc_all <- bind_rows(acc_mkt, acc_mining) |>
   relocate(series, .model, .type) |> 
   print()
 ```
 
 ```{r save-forecast-df}
 # Convert forecasts to tibble
-df_fc_U  <- as_tibble(fcbands_U)
-df_fc_PS <- as_tibble(fcbands_PS)
+df_fc_mkt  <- as_tibble(fcbands_mkt)
+df_fc_mining <- as_tibble(fcbands_mining)
 
-df_fc <- df_fc_U |>
-  select(date, mean_U = mean, lo80_U = lo80, hi80_U = hi80,
-         lo95_U = lo95, hi95_U = hi95) |>
+df_fc <- df_fc_mkt |>
+  select(month_date, mean_mkt = mean, lo80_mkt = lo80, hi80_mkt = hi80,
+         lo95_mkt = lo95, hi95_mkt = hi95) |>
   left_join(
-    df_fc_PS |>
-      select(date, mean_PS = mean, lo80_PS = lo80, hi80_PS = hi80,
-         lo95_PS = lo95, hi95_PS = hi95),
-    by = "date"
+    df_fc_mining |>
+      select(month_date, mean_mining = mean, lo80_mining = lo80, hi80_mining = hi80,
+         lo95_mining = lo95, hi95_mining = hi95),
+    by = "month_date"
   )
 
 write_csv(df_fc, "data/df_forecasts.csv")
@@ -719,6 +725,65 @@ write_csv(df_fc, "data/df_forecasts.csv")
 
 
 # Factor Model Application 
+
+```{r ols-reg}
+# Run regression 
+fit_reg_table <- function(idx_long, region_col, region_level_label) {
+  stopifnot(all(c("month_date", region_col, "value") %in% names(idx_long)))
+  
+  idx_long |>
+    inner_join(factor_trends, by = "month_date") |>
+    group_by(.data[[region_col]]) |>
+    group_modify(\(.x, .y) {
+      .x <- tidyr::drop_na(.x, value, market, mining, lifestyle)
+      if (nrow(.x) < 10) return(tibble(
+        alpha = NA_real_, market = NA_real_, mining = NA_real_,
+        lifestyle = NA_real_, r2 = NA_real_, durbin_watson = NA_real_
+      ))
+      fit <- lm(value ~ market + mining + lifestyle, data = .x)
+      coefs <- coef(fit)
+      r2    <- summary(fit)$r.squared
+      dw    <- tryCatch(as.numeric(lmtest::dwtest(fit)$statistic[["DW"]]),
+                        error = \(e) NA_real_)
+      tibble(
+        alpha     = unname(coefs[["(Intercept)"]]),
+        market    = unname(coefs[["market"]]),
+        mining    = unname(coefs[["mining"]]),
+        lifestyle = unname(coefs[["lifestyle"]]),
+        r2        = r2,
+        durbin_watson = dw
+      )
+    }) |>
+    ungroup() |>
+    rename(region = !!region_col) |>
+    mutate(region_level = region_level_label) |>
+    select(region, alpha, r2, durbin_watson, market, mining, lifestyle, region_level)
+}
+
+# Prepare city indexes
+city_long <- city_indexes |>
+  pivot_longer(
+    cols = -month_date,
+    names_to = "city",
+    values_to = "value"
+  )
+
+# Prepare SA4 indexes
+ sa4_long <- sa4_indexes |>
+   pivot_longer(
+     cols = -month_date,
+     names_to = "region",
+     values_to = "value")
+
+# Build regression coefficient table 
+reg_coefs_city <- fit_reg_table(city_long, region_col = "city",  region_level_label = "major_city")
+reg_coefs_sa4  <- fit_reg_table(sa4_long,  region_col = "region", region_level_label = "sa4_name")
+
+reg_coefs_new <- bind_rows(reg_coefs_city, reg_coefs_sa4)
+
+readr::write_csv(reg_coefs_new, "data/df_reg_coefs.csv")
+```
+
 
 ## Goodness of Fit
 
@@ -731,7 +796,7 @@ We now turn to evaluating how well the factor model captures the variation in in
 * Bottom cities and rest-of-state: Smaller or resource-dependent markets.
 
 ```{r model-r2-city}
-reg_city <- reg_coefs |> filter(region_level == "major_city")
+reg_city <- reg_coefs_new |> filter(region_level == "major_city")
 
 # Rank the major cities by r2 and print top and bottom 10 
 ranked_city <- reg_city |>
@@ -774,7 +839,7 @@ kable(
 
 ```{r model-r2-sa4}
 # Filter the SA4 regions in the coefficient data 
-reg_sa4 <- reg_coefs |> filter(region_level == "sa4_name")
+reg_sa4 <- reg_coefs_new |> filter(region_level == "sa4_name")
 
 # Rank the regions by r2 and print top and bottom 10 
 ranked_sa4 <- reg_sa4 |>
@@ -853,7 +918,7 @@ major_cities <- c(
   "GREATER SYDNEY"
 )
 
-city_r2 <- reg_coefs |>
+city_r2 <- reg_coefs_new |>
   filter(region %in% major_cities) |>
   transmute(city = region, r2)
 
@@ -911,7 +976,7 @@ ggplot() +
 At this stage, the model does not incorporate any time dynamics in the residuals. While it explains a substantial share of the variance for both cities and regions, the trending and autocorrelated nature of housing indexes means that the residuals themselves display extremely strong positive autocorrelation. This is evident in the Durbin–Watson statistics, which are close to zero across all regions: Major cities cluster around 0.02 to 0.05, while SA4 regions have a slightly broader range, extending up to 0.2, but still remain far below the benchmark value of 2. This pattern underscores the limitations of using a static regression framework without accounting for time-series dynamics.
 
 ```{r dw-stat}
-reg_coefs |>
+reg_coefs_new |>
   group_by(region_level) |> 
   summarise(
     dw_min = min(durbin_watson),
@@ -921,7 +986,7 @@ reg_coefs |>
     range = max(durbin_watson) - min(durbin_watson)
   )
 
-ggplot(reg_coefs, aes(x = region_level, y = durbin_watson, fill = region_level)) +
+ggplot(reg_coefs_new, aes(x = region_level, y = durbin_watson, fill = region_level)) +
   geom_violin(trim = FALSE, alpha = 0.6) +
   geom_boxplot(width = 0.1, outlier.shape = NA) +
   labs(title = "Durbin–Watson by region type",
@@ -939,7 +1004,7 @@ The distribution of market coefficients is tightly centred around 1.0 with relat
 The scatterplot analysis reveals a clear negative relationship between the market and mining coefficients. Regions with a strong loading on the national market factor tend to exhibit weaker or even negative loadings on the mining factor and vice versa.
 
 ```{r coef-pattern}
-reg_coef_long <- reg_coefs |>
+reg_coef_long <- reg_coefs_new |>
   select(region_level, market, mining) |>
   pivot_longer(c(market, mining),
                names_to = "factor", values_to = "coef")
@@ -992,13 +1057,13 @@ The ARIMAX framework maintains fixed regression coefficients while addressing se
 
 Several baseline specifications were tested through a grid search for the orders, and the optimal model was chosen by balancing AICc performance with Ljung–Box test results, ensuring that the residuals approximated white noise.
 
-As a result, five ARIMAX models were selected and fitted across regions according to their individual time series dynamics. Among the 88 SA4 regions, 75 passed the Ljung–Box test, indicating that their residuals approximate white noise.
+As a result, five ARIMAX models were selected and fitted across regions according to their individual time series dynamics. Among the 88 SA4 regions, 76 passed the Ljung–Box test, indicating that their residuals approximate white noise.
 
 ```{r reg-arimax-search}
 # Define variables 
-x_df <- factor_trends |> select(month_date, market, mining_ps, lifestyle)
+x_df <- factor_trends |> select(month_date, market, mining, lifestyle)
 
-df_all <- sa4_indexes_long |>
+df_all <-  sa4_long |>
   inner_join(x_df, by = "month_date") |>
   arrange(region, month_date) |>
   drop_na()
@@ -1015,7 +1080,7 @@ results <- df_all |>
   reframe({
     dates <- month_date
     y <- value
-    X <- as.matrix(pick(market, mining_ps, lifestyle))
+    X <- as.matrix(pick(market, mining, lifestyle))
     y_ts <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
     n <- length(y)
    # placeholders 
@@ -1040,13 +1105,13 @@ results <- df_all |>
       }
     }
     if (is.null(best_fit)) return(NULL)
-    b <- coef(best_fit)[c("market", "mining_ps", "lifestyle")]
+    b <- coef(best_fit)[c("market", "mining", "lifestyle")]
     tibble(
       best_model = paste0("ARIMAX(", best, ") d=0"),
       AICc = best_AICc,
       LB_p12 = best_p, #LB at lag 12 
       market = unname(b[1]),
-      mining_ps = unname(b[2]),
+      mining = unname(b[2]),
       lifestyle = unname(b[3])
     )
   })
@@ -1054,124 +1119,7 @@ results <- df_all |>
 results |> filter(LB_p12 >=0.05) |> count()
 results |> group_by(best_model) |> summarise(n = n(), pass_rate = mean(LB_p12 >= 0.05)) |> arrange(desc(pass_rate))
 
-reg_coefs_arimax <- results |> select(region, market, mining = mining_ps, lifestyle)
-```
-
-```{r reg-arimax, eval = FALSE}
-# Baseline fit 
-fit_xreg <- df_all |>
-  group_by(region) |>
-  group_map(~{
-    dates <- .x$month_date
-    y <- .x$value
-    reg <- .y$region[[1]]  
-    x <- as.matrix(.x[, c("market","mining_ps","lifestyle")])
-    y_ts <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
-    fit <- Arima(y_ts, order = c(1, 1,0), xreg = x, include.mean = FALSE, include.drift = FALSE) 
-    resid <- residuals(fit)
-    lb <- Box.test(resid, lag = 24, type = "Ljung-Box", fitdf = length(coef(fit)))
-    tibble(region = reg,
-           actual = y,
-           y_hat = as.numeric(fitted(fit)),
-           model = list(fit),
-           resid = list(resid),
-           aic = AIC(fit),
-           lb_p = lb$p.value) }) |> 
-  bind_rows()
-
-# Regions for finer fit 
-region_not_fit <- fit_xreg |> 
-  filter(lb_p < 0.05) |> 
-  select(region)|> 
-  unique() |>
-  pull(region)
-
-short_lag_regions <- c("BAROSSA - YORKE - MID NORTH","BENDIGO","BRISBANE - SOUTH","CAPITAL REGION","GEELONG","LAUNCESTON AND NORTH EAST","MACKAY - ISAAC - WHITSUNDAY","MELBOURNE - NORTH WEST","MORETON BAY - NORTH","NEWCASTLE AND LAKE MACQUARIE")
-
-seasonal_regions <- c("BALLARAT","BUNBURY","CENTRAL WEST","DARWIN","HOBART", "ILLAWARRA","IPSWICH","MELBOURNE - SOUTH EAST","PERTH - NORTH WEST","PERTH - SOUTH WEST","SOUTH EAST","SYDNEY - BAULKHAM HILLS AND HAWKESBURY","SYDNEY - INNER SOUTH WEST","SYDNEY - OUTER WEST AND BLUE MOUNTAINS","WESTERN AUSTRALIA - OUTBACK (NORTH)","WIDE BAY")
-
-# Finer fit - two models 
-fit_xreg_seasonal <- df_all |>
-  filter(region %in% seasonal_regions) |>
-  group_by(region) |>
-  group_map(~{
-    dates <- .x$month_date
-    y <- .x$value
-    reg <- .y$region[[1]]
-    x <- as.matrix(.x[, c("market","mining_ps","lifestyle")])
-    y_ts <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
-    fit <- Arima(y_ts, order = c(1,1,0), seasonal = list(order = c(1,0,0), period = 12),xreg = x, include.mean = FALSE, include.drift = FALSE)
-    resid <- residuals(fit)
-    lb <- Box.test(resid, lag = 24, type = "Ljung-Box", fitdf = length(coef(fit)))
-    tibble(
-      region = reg,
-      spec_label = "seasonal (1,1,0)(1,0,0)[12]",
-      model = list(fit),
-      resid = list(resid),
-      aic = AIC(fit),
-      lb_p = lb$p.value
-    )
-  }) |>
-  bind_rows()
-
-fit_xreg_short <- df_all |>
-  filter(region %in% short_lag_regions) |>
-  group_by(region) |>
-  group_map(~{
-    dates <- .x$month_date
-    y <- .x$value
-    reg <- .y$region[[1]]
-    x <- as.matrix(.x[, c("market","mining_ps","lifestyle")])
-    y_ts <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
-    fit <- Arima(y_ts, order = c(2,1,0), xreg = x, include.mean = FALSE, include.drift = FALSE) 
-    resid <- residuals(fit)
-    lb <- Box.test(resid, lag = 24, type = "Ljung-Box", fitdf = length(coef(fit)))
-    tibble(
-      region = reg,
-      spec_label = "short lag (2,1,0)",
-      model = list(fit),
-      resid = list(resid),
-      aic = AIC(fit),
-      lb_p = lb$p.value)}) |>
-  bind_rows()
-
-# Binding model testing outcomes
-results_arimax <- bind_rows(
-  fit_xreg |> 
-    summarise(pass = mean(lb_p > 0.05, na.rm = TRUE),
-              mean_AIC = mean(aic, na.rm = TRUE)) |> 
-    mutate(model = "Baseline ARIMA(1,1,0)"),
-  
-  fit_xreg_short |> 
-    summarise(pass = mean(lb_p > 0.05, na.rm = TRUE),
-              mean_AIC = mean(aic, na.rm = TRUE)) |> 
-    mutate(model = "Short lag ARIMA(2,1,0)"),
-  
-  fit_xreg_seasonal |> 
-    summarise(pass = mean(lb_p > 0.05, na.rm = TRUE),
-              mean_AIC = mean(aic, na.rm = TRUE)) |> 
-    mutate(model = "Seasonal ARIMA(1,1,0)(1,0,0)[12]")
-)
-
-kable(results_arimax, caption = "Model Diagnostics: p-values and AICc across ARIMA Variants")
-
-# Bind all airmax models 
-refit_regions <- c(short_lag_regions, seasonal_regions)
-fit_xreg_clean <- fit_xreg |> filter(!region %in% refit_regions)
-
-fit_all <- bind_rows(
-  fit_xreg_clean |> mutate(spec_label = "baseline (1,1,0)"),
-  fit_xreg_short,
-  fit_xreg_seasonal
-) 
-
-reg_coefs_arimax <- fit_all |>
-  group_by(region, spec_label) |> 
-  slice(1) |> 
-  ungroup() |> 
-  mutate(coefs = map(model, coef)) |>
-  unnest_wider(coefs) |> 
-  select(region, market, mining = mining_ps, lifestyle, spec_label)
+reg_coefs_arimax <- results |> select(region, market, mining, lifestyle)
 ```
 
 This section compares the coefficient distributions for three factors across two modelling approaches: OLS and ARIMAX. The OLS model (blue) represents a static regression using contemporaneous factors only, while the ARIMAX model (red) incorporates time-series autocorrelation to account for temporal dependencies in the residuals. From the boxplot we can see that: 
@@ -1192,10 +1140,10 @@ To illustrate this, we compare factor coefficients for Melbourne and Sydney’s 
 
 ```{r coef-compare}
 # Compare coefficients: OLS & ARIMAX 
-reg_coefs_ps <- reg_coefs_ps |> mutate(model_type = "OLS")
+reg_coefs_ols <- reg_coefs_new |> mutate(model_type = "OLS")
 reg_coefs_arimax <- reg_coefs_arimax |> mutate(model_type = "ARIMAX")
 
-reg_compare <- bind_rows(reg_coefs_ps, reg_coefs_arimax) |> 
+reg_compare <- bind_rows(reg_coefs_ols, reg_coefs_arimax) |> 
   select(region, model_type, market, mining, lifestyle) 
 
 # Save coefficient comparison data frame 
@@ -1232,114 +1180,6 @@ kable(reg_subset,
 
 ## Model Enhancement II: Time-dependent Coefficients 
 
-```{r roll-ridge, eval = FALSE}
-# Config set up cv for lambda 
-target <- "value"
-predictors <- c("market","mining_ps","lifestyle")
-win <- 60 
-
-# Set up panel 
-panel <- sa4_indexes_long |>
-  inner_join(factor_trends, by = "month_date") |> 
-  select(-mining) |> 
-  mutate(across(c(market, mining_ps, lifestyle),  ~ as.numeric(scale(.)))) |> # Scale predictors 
-  arrange(region, month_date) |> 
-  drop_na(all_of(c(target, predictors)))
-
-# Pull everything together in a matrix 
-X_all <- as.matrix(panel[, predictors, drop = FALSE])
-y_all <- panel[[target]]
-
-# Cross-validation to choose lambda
-cvfit <- cv.glmnet(x = X_all, y = y_all, alpha = 0, family = "gaussian", intercept = TRUE, standardize = FALSE, nfolds = 5)
-
-lambda_best <- cvfit$lambda.min
-
-# Fit the rolling OLS 
-regions <- unique(panel$region)
-
-# List and index for storing results
-all_rows <- list()
-row_counter <- 1L
-
-# Main function 
-for (r in regions) {
-  df_r <- panel[panel$region == r, , drop = FALSE]
-  n_r <- nrow(df_r)
-
-  for (i in seq.int(win, n_r)) {
-    rows_win <- seq.int(i - win + 1L, i)
-    dfw <- df_r[rows_win, , drop = FALSE]
-    if (anyNA(dfw[, c(target, predictors), drop = FALSE])) next
-
-    X <- as.matrix(dfw[, predictors, drop = FALSE])
-    y <- dfw[[target]]
-    
-    # Fit ridge regression 
-    fit <- glmnet(
-      x = X, y = y,
-      alpha = 0, lambda = lambda_best,
-      intercept = TRUE, standardize = FALSE,
-      family = "gaussian"
-    )
-
-    C <- as.matrix(coef(fit))
-    a0 <- as.numeric(C["(Intercept)", 1])
-    betas <- numeric(length(predictors))
-    names(betas) <- predictors
-    
-    for (p in predictors) {
-      betas[p] <- if (p %in% rownames(C)) as.numeric(C[p, 1]) else 0
-    }
-    t_end <- dfw$month_date[win]
-
-    all_rows[[row_counter]] <- tibble(
-      region = r,
-      month_date = t_end,
-      alpha = a0,
-      !!!as.list(betas)
-    )
-    row_counter <- row_counter + 1L
-  }
-}
-
-# Result 
-coefs_ridge_roll <- bind_rows(all_rows)
-write_csv(coefs_ridge_roll, "data/df_ridge_coef.csv")
-
-#names_unique <- unique(coefs_ridge_roll$region) |> print()
-
-# Plot the rolling coefficients for selected regions
-s_mel <- coefs_ridge_roll |>
-  filter(region == "MELBOURNE - INNER") |>
-  arrange(month_date) |>
-  pivot_longer(all_of(predictors), names_to = "factor", values_to = "beta")
-
-s_syd <- coefs_ridge_roll |>
-  filter(region == "SYDNEY - CITY AND INNER SOUTH") |>
-  arrange(month_date) |>
-  pivot_longer(all_of(predictors), names_to = "factor", values_to = "beta")
-
-# !!double check this plot 
-ggplot(s_mel, aes(x = month_date, y = beta, colour = factor)) +
-  geom_line() +
-  geom_smooth(se = FALSE, method = "loess", span = 0.2, linewidth = 0.6, alpha = 0.6) +
-  labs(
-    title = "Rolling coefficients (Melbourne)", x = NULL, y = "Coefficient", colour = "Predictor") +
-  theme_minimal(base_size = 12)
-
-# Distribution of rolling coefficients for all regions
-all_long <- coefs_ridge_roll |> 
-  pivot_longer(all_of(predictors), names_to = "factor", values_to = "beta")
-
-ggplot(all_long, aes(x = beta)) +
-  geom_density() +
-  facet_wrap(~ factor, scales = "free_y") +
-  labs(
-    title = "Distribution of rolling coefficients (all regions)", x = "Coefficient", y = "Density") +
-  theme_minimal()
-```
-
 The expanding window approach was used to assess the stability of model coefficients over time. By gradually extending the estimation sample, we tested whether the relationships between regional housing indices and key factors remained consistent as new data of the following years was added. We refitted the OLS regression twice: First using data up to November 2022, and again including data up to November 2024. Comparing these two sets of coefficients allowed us to evaluate how much the estimated sensitivities of each factor changed when the sample expanded by two years.
 
 The table results displays the average yearly change and standard deviation of coefficients across regions. The intercept and market factors show small but positive shifts, while mining and lifestyle remain nearly unchanged. This suggests that the overall influence of these factors on housing prices has been highly stable between 2022 and 2024. While whe scatter plot compares the 2022 and 2024 coefficients for each factor. Points closely follow the 45° line, confirming that the factor effects are nearly identical across years. 
@@ -1349,10 +1189,9 @@ In conclusion, adding the most recent year of data did not materially alter the 
 ```{r expending-window}
 # Configuration 
 target <- "value"
-predictors <- c("market","mining_ps","lifestyle")
-panel <- sa4_indexes_long |>
+predictors <- c("market","mining","lifestyle")
+panel <- sa4_long |>
   inner_join(factor_trends, by = "month_date") |> 
-  select(-mining) |> 
   arrange(region, month_date) |> 
   drop_na(all_of(c(target, predictors)))
 
@@ -1394,7 +1233,6 @@ coefs_cuts <- panel |>
 
 # Comparison - table and plot 
 coef_diff <- coefs_cuts |>
-  rename(mining = mining_ps) |> 
   pivot_longer(
     cols = c(intercept, market, mining, lifestyle),
     names_to = "factor", values_to = "beta"
@@ -1424,126 +1262,13 @@ ggplot(coef_diff, aes(x = as_of_2024, y = as_of_2022, colour = factor)) +
     y = "Coefficient (up to 2024-11)"
   ) +
   theme_minimal()
-
 ```
 
 # Assessing the Boundedness of Market-Driven Forecasts
 
 To evaluate the reliability and stability of the regional housing forecasts, we assessed how bounded the projections are when driven solely by the national market factor. 
 
-The analysis was conducted using coefficients derived from both the OLS and ARIMAX specifications. While the OLS model provides a static benchmark, the ARIMAX model extends it by accounting for temporal dependence and reducing residual autocorrelation. In both cases, the mining factor spread was treated as the only varying source of uncertainty, with all other factors held constant. For each region, the 10-year growth implied by the market factor was projected, and a 95 per cent multiplicative uncertainty band was computed based on the volatility of the mining factor and the residual variance from each model. 
+The analysis was conducted using coefficients derived from both the OLS and ARIMAX specifications. While the OLS model provides a static benchmark, the ARIMAX model extends it by accounting for temporal dependence and reducing residual autocorrelation. 
 
-```{r uncertainty-lv, eval = FALSE}
-# Variance from 95% interval of PS 
-df_fc_PS <- df_fc |>
-  mutate(
-    half_width_95 = (hi95_PS - lo95_PS) / 2,
-    # Standard deviation 
-    sd_PS_95 = half_width_95 / 1.96,
-    # Variance
-    var_PS_95 = sd_PS_95^2
-  )
-
-# Pull the variance 
-sigma_delta_10yPS <- df_fc_PS |> 
-  filter(date == max(date)) |> 
-  pull(var_PS_95)
-
-# Rerun regression using only market and mining on city index 
-#city_indexes_long <- city_indexes |>
- # pivot_longer(cols = -month_date, names_to = "region", values_to = "mu_r")
-
-reg_panel <- sa4_indexes_long |>
-  left_join(factor_trends |> select(month_date, U = market, PS = mining_ps), by = "month_date") 
-
-reg_coefs2 <- reg_panel |>
-  group_by(region) |>
-  do({
-    fit <- lm(value ~ U + PS, data = .)
-    tidy_fit <- tidy(fit)
-    glance_fit <- glance(fit)
-    tibble(
-      beta = tidy_fit$estimate[ tidy_fit$term == "U" ],
-      lambda = tidy_fit$estimate[ tidy_fit$term == "PS" ],
-      r2 = glance_fit$r.squared,
-      var_eps = glance_fit$sigma^2
-    )
-  })
-
-# 95% multiplicative uncertainty band - ols 
-reg_uncertainty_ols <- reg_coefs2 |>
-  mutate(
-    sd_r = sqrt(lambda^2 * sigma_delta_10yPS + var_eps),
-    band95_low = exp(-1.96 * sd_r),
-    band95_high = exp(1.96 * sd_r),
-    band_width = band95_high - band95_low,
-    perc_error = (band95_high - 1) * 100
-  )
-
-# arimax 
-var_eps_arimax <- results |>
-  transmute(region, var_eps = map_dbl(model, \(m) m$sigma2))
-
-coefs_arimax <- reg_coefs_arimax |> 
-  transmute(region,
-            beta = market,
-            lambda = mining,
-            gamma = lifestyle)
-
-# 95% multiplicative uncertainty band - arimax
-reg_uncertainty_arimax <- coefs_arimax |>
-  inner_join(var_eps_arimax, by = "region") |> 
-  mutate(
-    sd_r = sqrt(lambda^2 * sigma_delta_10yPS + var_eps),
-    band95_low  = exp(-1.96 * sd_r),
-    band95_high = exp( 1.96 * sd_r),
-    band_width  = band95_high - band95_low,
-    perc_error  = (band95_high - 1) * 100
-  )
-
-# Summary table 
-reg_uncertainty_summary <- reg_uncertainty_arimax |>
-  mutate(
-    bracket = case_when(
-      perc_error < 10 ~ "0–10%",
-      perc_error < 20 ~ "10–20%",
-      TRUE ~ "20%+"
-    )
-  ) |>
-  group_by(bracket) |>
-  summarise(
-    n_regions = n(),
-    avg_error_pct = mean(perc_error, na.rm = TRUE),
-    min_error_pct = min(perc_error, na.rm = TRUE),
-    max_error_pct = max(perc_error, na.rm = TRUE)
-  ) |>
-  arrange(bracket)
-
-kable(reg_uncertainty_summary,
-      caption = "Distribution of 10-Year Market-Only Forecast Uncertainty (ARIMAX Model)",
-      digits = 2)
-
-# Plot comparison - OLS and arimax 
-reg_uncertainty_wide <- reg_uncertainty_ols |>
-  select(region, perc_error_ols = perc_error) |>
-  inner_join(reg_uncertainty_arimax |> select(region, perc_error_arimax = perc_error), by = "region")
-
-ggplot(reg_uncertainty_wide, aes(x = perc_error_ols, y = perc_error_arimax)) +
-  geom_point(alpha = 0.7) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", colour = "red") +
-  labs(
-    title = "Region-wise Comparison of Forecast Uncertainty",
-    subtitle = "Points below the dashed line mean ARIMAX produces narrower uncertainty bands",
-    x = "OLS Percentage Error",
-    y = "ARIMAX Percentage Error"
-  ) +
-  theme_minimal()
-```
-
-
-# Appendix: Long-term projection and macroeconomic scenarios
-
-
-
-
+In both cases, the mining factor spread was treated as the only varying source of uncertainty, with all other factors held constant. For each region, the 10-year growth implied by the market factor was projected, and a 95 per cent multiplicative uncertainty band was computed based on the volatility of the mining factor and the residual variance from each model. 
 

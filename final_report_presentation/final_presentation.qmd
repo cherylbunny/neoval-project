@@ -1,0 +1,333 @@
+---
+title:  Regional Dynamics of Australian Housing Indexes
+author: Yiran Yao 
+date: today
+toc: false
+format:
+  presentation-beamer: default
+  presentation-revealjs+letterbox: default
+---
+
+```{r global-setting}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE
+)
+```
+
+```{r}
+#| label: load-packages
+library(knitr)
+library(tidyverse)
+library(dplyr)
+library(janitor)
+library(knitr)
+library(kableExtra)
+```
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE}
+# Raw housing index 
+city_indexes <- read_csv("../data/city_indexes.csv")
+sa4_indexes <- read_csv("../data/sa4_indexes.csv")
+
+# PC proxy with identified characteristic
+factor_trends <- read_csv("../data/df_factor_trends.csv") 
+
+# Static regression coef 
+reg_coefs <- read_csv("../data/df_reg_coefs.csv") 
+
+# PC score and loadings
+pcs <- read_csv("../data/df_pcs.csv")
+eofs_city <- read_csv("../data/df_eofs_city.csv")
+eofs_sa4 <- read_csv("../data/df_eofs_sa4.csv")
+
+# Cleaning names 
+city_indexes <- city_indexes |> 
+  clean_names() 
+
+# Remove duplicated ACT row
+reg_coefs <- reg_coefs |>
+  filter(!(region == "AUSTRALIAN CAPITAL TERRITORY" & duplicated(region)))
+```
+
+
+## Background 
+
+In real estate, key questions shape both professional strategy and academic research, guiding long-term policy and investment decisions. These include:
+
+-   How can we project housing prices at the local level?
+-   What drives price fluctuations over time?
+-   Which regions will gain desirability or investment potential in the coming decade?
+
+## Problem 
+
+Existing approaches are effective but depend on diverse data sources that require extensive preprocessing and alignment with housing indexes. 
+
+-   Time-series models: Region-specific forecasts that work well short-term but are labor-intensive and don’t scale easily.
+-   Econometric models: Capture causal links with economic variables, but forecasts suffer if inputs are uncertain.
+-   Machine learning: High predictive accuracy (e.g., random forest, XGBoost), though interpretability is limited.
+
+## Project Framework 
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.6\linewidth]{fig/framework.jpg}
+\caption{Top 3 principal components of regional housing indexes}
+\end{figure}
+
+## Methodology 
+
+W. Silp proposed a PCA-based framework for housing index analysis. We extend it with time series forecasting and multivariate regression using only: **Logged monthly housing index growth (1995–2024)**. The first three principal components explain 96.5% of variation in housing indexes. 
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.6\linewidth]{fig/pcs.jpg}
+\caption{Top 3 principal components of regional housing indexes}
+\end{figure}
+
+
+## PCA Summary
+
+If we look at those top 3 PCs more closely, we found some shared patterns across regions. We named them: **Market, Mining, and Lifestyle** factors.
+
+```{r}
+tb1 <- eofs_city |>
+  filter(mode == 0) |>
+  arrange(desc(loading_value)) |>
+  slice_head(n = 3) |>
+  mutate(side = "top") |>
+  bind_rows(
+    eofs_city |>
+      filter(mode == 0) |>
+      arrange(loading_value) |>
+      slice_head(n = 3) |>
+      mutate(side = "bottom")
+  ) |>
+  arrange(desc(side), desc(loading_value)) |>
+  select(major_city, loading_value)
+
+tb2 <- eofs_city |>
+  filter(mode == 1) |>
+  arrange(desc(loading_value)) |>
+  slice_head(n = 3) |>
+  mutate(side = "top") |>
+  bind_rows(
+    eofs_city |>
+      filter(mode == 1) |>
+      arrange(loading_value) |>
+      slice_head(n = 3) |>
+      mutate(side = "bottom")
+  ) |>
+  arrange(desc(side), desc(loading_value)) |>
+  select(major_city, loading_value)
+
+tb3 <- eofs_city |>
+  filter(mode == 2) |>
+  arrange(desc(loading_value)) |>
+  slice_head(n = 3) |>
+  mutate(side = "top") |>
+  bind_rows(
+    eofs_city |>
+      filter(mode == 2) |>
+      arrange(loading_value) |>
+      slice_head(n = 3) |>
+      mutate(side = "bottom")
+  ) |>
+  arrange(desc(side), desc(loading_value)) |>
+  select(major_city, loading_value)
+
+mk_tbl <- function(df, m) {
+  df |>
+    filter(mode == m) |>
+    arrange(desc(loading_value)) |>
+    slice_head(n = 3) |>
+    mutate(side = "top") |>
+    bind_rows(
+      df |>
+        filter(mode == m) |>
+        arrange(loading_value) |>
+        slice_head(n = 3) |>
+        mutate(side = "bottom")
+    ) |>
+    arrange(desc(side), desc(loading_value)) |>
+    select(major_city, mode, loading_value)
+}
+
+tb1 <- mk_tbl(eofs_city, 0) |> rename(Region_name = major_city, PC1 = mode, loading = loading_value)
+tb2 <- mk_tbl(eofs_city, 1) |> rename(Region_name = major_city, PC2 = mode, loading = loading_value)
+tb3 <- mk_tbl(eofs_city, 2) |> rename(Region_name = major_city, PC3 = mode, loading = loading_value)
+
+final_tbl <- dplyr::bind_cols(tb1, tb2, tb3)
+
+knitr::kable(
+  final_tbl,
+  col.names = c("Major city","Mode","Loading","Major city","Mode","Loading","Major city","Mode","Loading"),
+  align = "lcrlcrlcr",
+  digits = 4,
+  caption = "Top and bottom loadings for the first three principal components (PC1–PC3)"
+  ) |>
+  kableExtra::kable_styling(full_width = FALSE, font_size = 6)
+
+
+```
+
+
+## From PC to Factor Series 
+
+PCs were approximated as weighted averages of regional indexes for greater stability, interpretability, and modeling utility, while retaining **>96% of the original variance**.
+
+
+::: columns
+::: {.column width="40%"}
+\begin{equation*}
+\delta_{PS}(t)
+= \mu_P(t)
+- \frac{\operatorname{cov}(\mu_P, U)}{\operatorname{cov}(\mu_S, U)}\, \mu_S(t)
+\end{equation*}
+
+\footnotesize \textbf{PC2 proxy (Perth–Sydney adjusted spread):} capturing the difference between Perth and Sydney after removing their shared national market component.
+:::
+
+::: {.column width="60%"}
+\begin{figure}[h!]
+\centering
+\includegraphics[width=\linewidth]{fig/pc_proxy.jpg}
+\caption{\small Mining factor proxy construction: comparing Perth and Sydney responses to the national cycle.}
+\end{figure}
+
+:::
+:::
+
+
+
+
+## EDA 
+
+-   The market factor shows long-term growth, behaving like a random walk with drift.
+-   The mining factor rises, drops and fluctuates, reflecting resource-sector shifts.
+
+\begin{figure}[h!]
+\centering
+\includegraphics[width=0.7\linewidth]{fig/autoplot.jpg}
+\caption{\small Forecast visualisation of factors}
+\end{figure}
+
+
+## EDA 
+
+-   Neither factor shows seasonality; variation is driven by long-term structural changes. 
+
+-   These non-seasonal trends suggest forecasting should emphasize regime shifts and structural breaks over seasonal adjustments.
+
+::: columns
+::: {.column width="50%"}
+![](fig/market_season.jpg){width=100%}
+:::
+
+::: {.column width="50%"}
+![](fig/market_subseason.jpg){width=100%}
+:::
+:::
+
+
+## Forecasting Factors: Market
+
+-   The market factor is non-stationary and resembles a random walk with drift. ARIMA(0,1,0) was used as a benchmark and compared with neighboring models using AICc and Ljung-Box statistics.
+
+-   None passed the Ljung-Box test at 5%, likely due to subtle fluctuations; this was addressed downstream via ARIMAX.
+
+-   **ARIMA(1,1,0) with a Fourier term of 2** was selected for its simplicity, assumption alignment, and residuals showing no visible trend or seasonality. Fourier captured the **quasi-periodic cycles** that are not exactly the same length or amplitude each time. 
+
+
+## Forecasting Factors: Mining 
+
+The mining factor **oscillated around zero with abrupt regime changes** during mining booms and busts. This was addressed using **dummy variables as exogenous regressors**. Residual dynamics were modeled with **ARIMA(2,1,1)**, which satisfied the Ljung-Box test.
+
+\begin{center}
+\includegraphics[width=0.7\linewidth]{fig/mining_strbreak.jpg}
+\end{center}
+
+## Test Set Performance & Prediction Interval 
+
+The market factor yields low forecast error (RMSE = 0.0144, MAE = 0.0131), consistent with its stable dynamics. The mining factor exhibits higher error (RMSE = 0.0214, MAE = 0.0180), reflecting its greater volatility and cyclical nature.
+
+Ten-year forecasts show a rising market trend and a stable mining path, with reduced volatility from excluding boom–bust effects.
+
+:::{.columns}
+::: {.column width="50%"}
+![](fig/pi80_market.jpg){width=100%}
+:::
+
+::: {.column width="50%"}
+![](fig/pi80_mining.jpg){width=100%}
+:::
+:::
+
+
+## Factor Regression: Link Regional Indexes to Factors
+
+\begin{equation*}
+\mu_r(t)
+= \alpha_r 
++ \beta_r M(t)
++ \lambda_r \delta_{PS}(t)
++ \gamma_r \delta_{L}(t)
++ \varepsilon_r(t)
+\end{equation*}
+
+\footnotesize \textbf{Static OLS regression:} linking each region's housing index $\mu_r(t)$ to the national market factor $M(t)$, the mining factor $\delta_{PS}(t)$, and the lifestyle factor $\delta_{L}(t)$.
+
+:::{.columns}
+::: {.column width="50%"}
+![](fig/r2.jpg){width=100%}
+:::
+
+::: {.column width="50%"}
+![](fig/dw.jpg){width=100%}
+:::
+:::
+
+
+## Model Enhancement: ARIMAX 
+-  ARIMAX extends ARIMA by adding exogenous regressors and modeling serial dependence, with orders chosen via grid search. Five models were fitted; 75 of 88 regions passed diagnostic checks.
+
+-   Under ARIMAX, lifestyle effects weaken slightly in lifestyle regions, mining effects soften in mining regions, while market coefficients remain largely stable.
+
+\begin{center}
+\includegraphics[width=0.6\linewidth]{fig/arimax_ols_comp.jpg}
+\end{center}
+
+## Model Enhancement: ARIMAX 
+
+\begin{center}
+\includegraphics[width=0.8\linewidth]{fig/model_resid.jpg}
+\end{center}
+
+## Model Enhancement: Moving Window 
+
+-   We extended the sample to test stability in factor–housing relationships as new data was added.
+
+-   OLS was refitted using data up to Nov 2022 and Nov 2024 to assess coefficient changes.
+
+-   Intercept and market effects shifted slightly; mining and lifestyle remained stable. A moving window could improve temporal robustness.
+
+```{r}
+tbl_change <- tribble(
+~factor, ~mean_change, ~sd_change,
+"intercept", 0.0642788718, 0.010301300,
+"lifestyle", 0.0014197803, 0.008310492,
+"market", 0.0318599228, 0.005433903,
+"mining", -0.0004912184, 0.002640947
+)
+
+kable(tbl_change, digits = 4) 
+```
+
+## Conclusion 
+
+We delivered a scalable, interpretable tool for understanding Australia’s housing cycles beyond traditional region-by-region models.
+
+-   A unified factor–forecasting framework that links regional housing indexes to interpretable national and mining dynamics through PCA, ARIMA, and ARIMAX modelling.
+-   Region-specific forecasts with stable, data-driven coefficients that capture both structural trends and time-varying effects.
+

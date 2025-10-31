@@ -1,0 +1,1402 @@
+---
+title: "Regional Housing Market Dynamics in Australia"
+author:
+- name: Yiran Yao 
+  degrees: Master of Business Analytics 
+  email: yyao0066@student.monash.edu
+phone: (03) 9905 2478
+email: BusEco-Econometrics@monash.edu
+organization: Neoval
+bibliography: references.bib
+format: report-pdf
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, 
+                      message = FALSE, 
+                      warning = FALSE, 
+                      fig.align = "center",
+                      fig.width = 8, 
+                      fig.height = 4
+                      )
+```
+
+```{r library}
+library(tidyverse)
+library(janitor)
+library(lubridate)
+library(forecast)
+library(fabletools)
+library(fpp3)
+library(urca)
+library(broom)
+library(tseries)
+library(scales)
+library(slider)
+library(kableExtra)
+library(patchwork)
+library(sf)
+library(distributional) 
+library(glue)
+library(GGally)
+library(zoo)
+library(strucchange)
+library(slider)
+library(glmnet)
+library(lmtest)  
+```
+
+```{r load-data}
+# Raw housing index for major cities and SA4 regions 
+city_indexes <- read_csv("../data/city_indexes.csv")
+city_indexes <- city_indexes |> 
+  clean_names() 
+sa4_indexes <- read_csv("../data/sa4_indexes.csv")
+
+# Factor series (PC proxy for the first 3 PCs)
+factor_trends <- read_csv("../data/df_factor_trends.csv") 
+factor_trends <- factor_trends |> 
+  select(-lifestyle_melb_nsw) |> # Remove PC3 (lifestyle) experimental column 
+  mutate(month_date = yearmonth(month_date)) |> 
+  as_tsibble(index = month_date)
+
+# Static regression coef - better do this regression yourself 
+#reg_coefs <- read_csv("../data/df_reg_coefs.csv") 
+
+# PC score and loadings
+pcs <- read_csv("../data/df_pcs.csv")
+eofs_city <- read_csv("../data/df_eofs_city.csv")
+eofs_sa4 <- read_csv("../data/df_eofs_sa4.csv")
+
+# For plotting SA4 geographic map
+sa4 <- st_read("../data/SA4_2021_AUST_SHP_GDA2020/SA4_2021_AUST_GDA2020.shp", 
+               quiet = TRUE)
+
+# Remove duplicated ACT row
+#reg_coefs <- reg_coefs |>
+ # filter(!(region == "AUSTRALIAN CAPITAL TERRITORY" & duplicated(region)))
+```
+
+# Introduction 
+
+Housing markets are influenced by a complex interplay of regional, social, and macroeconomic factors that interact over time and across space. Prior research has shown that these dynamics often co-move through common systematic forces, such as macroeconomic cycles and financial conditions, motivating the use of factor-based models to capture shared market behaviour [@case2010]. However, while approaches such as region-specific time series models, multivariate regressions, or machine learning methods can account for these dependencies, they are often computationally intensive and may obscure the underlying drivers of price variation.
+
+To address these challenges, Sijp, Panagiotelis, and Francke (2025) [@sijp2025] propose an analytical framework that applies Principal Component Analysis (PCA) to regional housing price indexes. This data-driven approach systematically extracts the principal sources of variation in housing prices, providing a more interpretable and efficient means of identifying the structural forces shaping regional housing markets.
+
+The PCA results show that the first three principal components capture much of the behavior of local price indexes, as a linear combination of their time series explains most of the variance in the housing index. Nevertheless, the PCA-based linear model lacks robustness across different time windows, and its coefficient estimates must be derived directly from the PCA procedure.
+
+Our exploratory research extends the PCA approach by addressing these limitations through a factor linear model, which uses time series data directly, with independent variables serving as proxies for the PCA-derived principal components. We model the factor proxies as time series using forecasting techniques to obtain their projected values. The forecasted factor series are then integrated into a linear modelling framework to produce projected housing price indexes. An ARIMA specification is employed to account for residual autocorrelation, while time-varying coefficients are introduced to reflect changes in regional dynamics over time.
+
+The resulting factor model can be applied for a variety of purposes, but our central aims is to **assess the regional housing market sensitivity to national and sectoral trends.** By quantifying how each region responds to national, mining, and lifestyle factors, the model enables identification of regions most exposed to structural trends, such as shifts in mining investment or lifestyle migration. These outputs can inform policy analysis, highlighting areas vulnerable to affordability pressures or cyclical volatility, and support investment decisions by revealing which regions are likely to outperform or lag under different macroeconomic conditions.
+
+# Methodologies and Datasets 
+
+## Methodologies 
+
+### PCA 
+
+Principal Component Analysis (PCA) was initially applied to the original housing price indexes at the Statistical Area Level Two (SA2) regional level, after which the results were aggregated to broader geographic scales as required. It is useful to briefly revisit PCA and how it allowed us to identify specific factors. The original analysis was conducted by Will Sijp, the supervisor of this project, with comprehensive details provided in the referenced works. The following section presents a brief summary of his methodology.
+
+PCA is a statistical method that reduces complex datasets into a smaller number of uncorrelated components, each capturing a dominant source of variation. In our project, the PC1 explains 96% of the variance, while PC2 and PC3 account for 2.5% and 0.7%, respectively. Together, these three components capture nearly all the variability in the housing indexes. @fig-pcs illustrates the temporal evolution of the first three principal components derived from the PCA of regional housing price indexes, notably, only PC1 exhibits a clear upward trend, while PC2 and PC3 display mean-reverting dynamics.
+
+The loadings from the PCA highlight which regions contribute most strongly to each component: 
+
+The first principal component (PC1) exhibits uniformly positive loadings across almost all regions, capturing the dominant national housing trend. It reflects broad macroeconomic influences such as monetary policy, interest rates, and aggregate demand that drive housing prices nationwide. As this component explains the majority of total variance in the dataset, it can be interpreted as the “market” factor, representing the shared cyclical movement of housing prices across Australia’s regions.
+
+The second principal component (PC2) displays strong positive loadings in mining-intensive regions such as Western Australia, Queensland, and the Northern Territory, and negative loadings in service-based urban centres like Sydney and Melbourne. This spatial pattern suggests that PC2 represents housing market behaviour linked to the mining industry, characterised by rapid price growth during resource booms and extended periods of decline afterward. It highlights the cyclical and volatile behaviour of regions reliant on mining compared with those driven by other sectors.
+
+The third principal component (PC3) shows strong positive loadings in coastal and amenity-rich areas such as the Central Coast, Noosa, and the South Coast of New South Wales, and negative loadings in inner-city regions. This spatial distribution reflects migration from metropolitan centres toward lifestyle-oriented destinations, particularly during periods of high urban housing costs or increased remote working. PC3 therefore captures the lifestyle-driven movement toward regional housing, influenced by affordability, natural environment, and quality-of-life factors.
+
+```{r pc-plot}
+#| label: fig-pcs
+#| fig-cap: The first three principal components summarise the dominant sources of systematic variation in regional housing price dynamics.
+pcs |>
+  filter(mode %in% 0:2) |>
+  ggplot(aes(
+    x = period,
+    y = pc_value,
+    colour = factor(mode)
+  )) +
+  geom_line() +
+  labs(
+    title = "Principal Components (PC1–PC3) of Regional Housing Indexes",
+    x = "Date",
+    y = "PC Value",
+    colour = "Component"
+  ) +
+  theme_classic()
+```
+
+
+### Factor-Based Substitutes for Principal Components
+
+The PCA-derived components provide a compact statistical summary of regional housing dynamics, but their direct use in forecasting can be challenging, as principal components may shift when the estimation window changes. To address this, we construct a set of factor proxies that reproduce the behaviour of the PCA components using simple and economically interpretable index combinations.
+
+Comparable efforts to model spatial and temporal dependencies in regional housing prices include the work of Valentini, Ippoliti, and Fontanella (2013) [@valentini2013], who employed a spatial dynamic structural equation model to extract latent factors underlying U.S. housing markets. Although their approach is based on dynamic latent factors rather than Principal Component Analysis (PCA), both methodologies share the aim of dimensionality reduction and identifying the dominant sources of variation across regions.
+
+Each regional index $\mu_r$ is approximated as a linear combination of these factors and an idiosyncratic residual:
+
+$$
+\mu_r = \beta_r U + \lambda_r \,\delta_{\mathrm{PS}} + \gamma_r \,\delta_{\mathrm{L}} + \epsilon_r
+$$ {#eq-factor-model}
+
+@eq-factor-model $U$ denotes the market (national) factor, $\delta_{PS}$ the Perth–Sydney spread, $\delta_{L}$ the lifestyle spread, and $\epsilon_r$ the residual term. As lifestyle's influence is more subtle and region-specific, it is generally treated together with the residual term, and only highlighted in areas where lifestyle dynamics play a significant role. This formulation replaces abstract PCA components with observable spreads between city or regional indexes that capture similar variation patterns. Three factors are defined:
+
+**Market factor** (aligned with PC1): represented by the national housing index $U$, capturing the broad macroeconomic trend common to all regions.
+
+**Mining factor** (associated with PC2): proxied by the Perth–Sydney spread, defined as
+
+$$
+\delta_{\mathrm{PS}} = \mu_P - \alpha \mu_S
+$$ {#eq-ps-spread}
+
+@eq-ps-spread $\mu_P$ and $\mu_S$ are the log indexes for Greater Perth and Greater Sydney respectively. $\alpha$ is a scaling coefficient chosen to remove the shared national trend. It is estimated as $\alpha = \frac{\operatorname{cov}(\mu_P, U)}{\operatorname{cov}(\mu_S, U)},$ yielding a value of 0.94. This adjustment isolates the cyclical movements of mining-driven regions relative to service-based economies.
+
+**Lifestyle factor** (corresponding to PC3): constructed by contrasting the average of high-amenity coastal and regional areas with that of major metropolitan centres, thereby capturing migration and demand shifts toward lifestyle-oriented markets. The scaling coefficient is established to be 0.82 using the same covariance-based approach as above.
+
+```{r pc-factor-corr}
+#| label: fig-pc-factor-corr
+#| fig-cap: Comparison of PCs 2 and 3 with their corresponding factor series reveals highly similar dynamics, with correlations exceeding 98%. PC1 and factor U are identical by construction.
+#| fig-pos: H
+
+factor_long <- factor_trends |>
+  select(month_date, mining, lifestyle) |>
+  pivot_longer(c(mining, lifestyle),
+               names_to = "series",
+               values_to = "value") |>
+  mutate(type = "Factor")
+
+pcs_long <- pcs |>
+  filter(mode %in% 1:2) |>
+  transmute(
+    period,
+    series = paste0("PC", mode + 1),
+    value  = pc_value,
+    type   = "PC"
+  ) |>
+  rename(month_date = period)
+
+combined <- bind_rows(factor_long, pcs_long) |>
+  group_by(type, series) |>
+  mutate(value_std = as.numeric(scale(value))) |>
+  ungroup()
+
+ggplot(combined,
+       aes(month_date, value_std, colour = series, linetype = type)) +
+  geom_line() +
+  labs(
+    title = "PCs vs Factor Series (standardised)",
+    x = "Period",
+    y = "Standardised value",
+    colour = "Series",
+    linetype = "Source"
+  ) +
+  theme_minimal()
+```
+
+
+These proxies achieve correlations above 98% with their corresponding principal components and display closely aligned patterns @fig-pc-factor-corr, indicating that they preserve the explanatory strength of the PCA while enhancing interpretability and temporal stability for use in regression and forecasting.
+
+### Forecasting of Factors
+
+Once the factor series were defined, we modelled each factor series separately using time series forecasting methods. The process included exploratory analysis, stationarity checks, and STL decomposition to characterise the data. Guided by these diagnostics, we selected suitable ARIMA-type models, enhancing them with Fourier terms to capture seasonality and intervention dummies to address structural breaks.
+
+### Integration into a Factor Modelling Framework
+
+The linear model regresses each regional housing index on the factor proxies, yielding coefficients that represent the sensitivity of local markets to the underlying factors, the coefficients are estimated for each region $r$. These coefficients help to capture the response of the local market to each factor. Model performance was evaluated using $R^2$ and residual diagnostics to check that key assumptions held. Forecasts of the factor proxies were then substituted into the model to obtain projected housing indexes.
+
+### Factor Model Enhancement 
+
+Residual diagnostics from the static factor model indicated autocorrelation, suggesting that regional price dynamics were not fully captured by contemporaneous factors alone. To address this, the model was extended using an ARIMAX framework, retaining the same factor proxies as exogenous variables while incorporating autoregressive and moving-average terms to account for temporal dependence. An expanding-window approach was adopted to re-estimate models as new data became available, enabling coefficients to adapt to evolving market conditions and improving both model stability and forecast accuracy.
+
+## Use Case 
+
+The proposed model establishes a robust analytical framework for examining and forecasting regional housing market dynamics across Australia. By quantifying the sensitivity of each region to national, mining, and lifestyle factors, it facilitates the identification of areas most exposed to long-term structural forces. Furthermore, the model enables an assessment of spatial divergence within the national housing system by evaluating the degree of co-movement between regional and aggregate market trends, thereby elucidating whether regional growth patterns exhibit systematic and predictable behaviour over time.
+
+## Datasets 
+
+The datasets used in this study are provided by Neoval Pty Ltd. and consist of housing price indexes across Australian regions. These indexes are derived from state valuer general transaction records covering about three million detached house sales between January 1995 and November 2024, including sale prices, dates, and property coordinates. Rather than analysing the raw transactions directly, local repeat-sales indexes are constructed and examined using a three-factor model, with both regional indexes and factors represented as time-series. Owing to confidentiality agreements, further details of the data collection process cannot be disclosed. 
+
+All supplementary datasets are derived directly from these housing price indexes and underpin the principal analyses involving PCA and factor construction. Spatial boundary data from the Australian Bureau of Statistics (ABS) are additionally incorporated to support the geographic visualisation of results.
+
+All datasets are organised and available in the data folder: 
+
+* Monthly log-transformed changes in housing price indexes at both the city and SA4 levels, named `city_indexes` and `sa4_indexes`
+* PCA results including PC scores and loadings, named `df_pcs`, `df_eofs_city`, and `df_eofs_sa4`
+* Mean-adjusted factor series derived from the PCA results, named `df_factor_trends`
+* Regression coefficients estimated from the factor proxies, named `df_reg_coefs_new`
+* Geographic data for SA4 regions, named `SA4_2021_AUST_SHP_GDA2020.shp`
+
+## Project Limitation 
+
+This project faces several dataset-related limitations, including but not limited to the following: 
+
+* Historical Scope: PCA results and coefficients are based on 29 years of data (1995–2024), which may not fully reflect future patterns. 
+* Measurement Bias: Indexes rely on hedonic and repeat-sales methods, which involve assumptions that may introduce bias. 
+
+* Proxy Validity: Factor proxies are heuristic choices and may not perfectly represent the underlying principal components. 
+
+* Data Sensitivity: Outcomes are highly data-driven and depend strongly on the chosen datasets and methods. 
+
+* Structural Shocks: Events like the mining boom, COVID-19, or policy shifts may not be well captured by static models or PCA. 
+
+* Macroeconomic Variables: The model does not explicitly incorporate broader economic indicators, which could enhance explanatory power.
+
+# Exploratory Analysis 
+
+The exploratory analysis employs a series of visualisations to examine the dynamics of the national and mining trends, which constitute the primary focus of this project. Autoplot functions are first used to illustrate the overall temporal evolution of these factors, followed by seasonal and sub-seasonal plots to identify potential cyclical or recurrent patterns. Together, these visual analyses provide insights into the structural characteristics of the series, forming a basis for subsequent forecasting model design and selection.
+
+@fig-autoplot illustrates that the market factor exhibits a sustained upward trajectory from 2003 to 2012, followed by a moderated growth phase extending to 2019. A pronounced regime shift occurs during 2020–2022, coinciding with the COVID-19 period, after which the series remains at elevated yet volatile levels, with growth rates continuing to vary over time. In contrast, the mining factor displays a more uneven and protracted increase from 2003 to 2012, succeeded by a sharp structural adjustment and subsequent COVID-related fluctuations, reflecting continued time-varying behaviour in both level and volatility.
+
+```{r autoplot}
+#| label: fig-autoplot 
+#| fig-cap: Temporal evolution of the market and mining factors. Both series display distinct patterns and structural shifts. 
+#| fig-pos: H
+
+p1 <- factor_trends |> autoplot(market) + labs(title = "Market Factor (National Trend)", x = "Year-Month", y = "Index")
+p2 <- factor_trends |> autoplot(mining) + labs(title = "Mining Factor (Perth-Sydney Spread)", x = "Year-Month", y = "Index")
+
+p1 + p2
+```
+
+@fig-seaonal illustrates that the market factor displays pronounced within-year gradients primarily driven by a persistent long-term upward trajectory, with no systematic month-of-year seasonality evident. In contrast, the mining factor exhibits minimal intra-annual variation, showing no consistent pattern across months. However, its overall level fluctuates notably between years, indicating that longer-term structural influences rather than seasonal effects govern its dynamics.
+
+```{r seasonal-plot}
+#| label: fig-seaonal 
+#| fig-cap: Seasonal patterns of the market and mining factors, showing no consistent month-of-year effects and highlighting trend-dominated behaviour.
+#| fig-pos: H
+
+p3  <- factor_trends |> gg_season(market) + labs(title = "Market Factor (National Trend)", x = "Month", y = "Index") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+p4 <- factor_trends |> gg_season(mining) + labs(title = "Mining Factor (Perth-Sydney Spread)", x = "Month", y = "Index") + theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p3 + p4
+```
+
+@fig-subseasonal demonstrates that each monthly panel of the market factor exhibits a consistent upward trajectory, with mean values across months remaining largely stable. This pattern indicates that the series is primarily trend-driven rather than influenced by seasonal effects. Similarly, the mining subseries plot reveals no pronounced seasonal structure, as the monthly profiles maintain comparable shapes and the corresponding means remain relatively flat and centred near zero, underscoring the absence of systematic month-specific variation.
+
+```{r subseries-plot}
+#| label: fig-subseasonal
+#| fig-cap: Subseries plots of the market and mining factors, indicating stable monthly profiles and the absence of systematic seasonal variation.
+#| fig-pos: H
+
+p5 <- factor_trends |> gg_subseries(market) + labs(title = "Market Factor (National Trend)", x = "Month", y = "Index") +
+  theme(axis.text.x = element_text(size = 5, angle = 45, hjust = 1), strip.text = element_text(size = 8))
+p6 <- factor_trends |> gg_subseries(mining) + labs(title = "Mining Factor (Perth-Sydney Spread)", x = "Month", y = "Index") +
+  theme(axis.text.x = element_text(size = 5, angle = 45, hjust = 1), strip.text = element_text(size = 8))
+
+p5 + p6
+```
+
+
+# Time Series Forecasting 
+
+Following the exploratory analysis, this section develops time series forecasts for the extracted factors, which are later used as explanatory inputs in the regional factor model. Our approach consists of three main steps:
+
+* Visual inspection and preliminary diagnostics: We begin with graphical and statistical exploration of each factor using STL decomposition, autocorrelation (ACF), and partial autocorrelation (PACF) plots. These tools help identify underlying trend and seasonal components, potential structural breaks, and the degree of persistence in each series.
+
+* Model estimation and comparison: Several competing forecasting models are fitted to each factor, including benchmark methods and parametric time series models. Model selection is guided by information criteria and diagnostic checks on model adequacy.
+
+* Residual analysis and forecast evaluation: The residuals from each fitted model are examined to verify the absence of autocorrelation and non-stationary patterns. Forecast performance is then assessed using the holdout sample (one year of observations), ensuring that the chosen models generalise well beyond the training period.
+
+```{r test-train-split}
+train_mkt <- factor_trends |> 
+  select(market, month_date) |> 
+  filter(month_date < yearmonth("2023 Jan")) 
+
+test_mkt <- factor_trends |> 
+  select(market, month_date) |> 
+  filter(month_date >= yearmonth("2023 Jan")) 
+
+train_mining <- factor_trends |>
+  select(month_date, mining) |>
+  filter(month_date < yearmonth("2023 Jan")) 
+
+test_mining <- factor_trends |> 
+  select(month_date, mining) |>
+  filter(month_date >= yearmonth("2023 Jan")) 
+```
+
+## Forecasting the Market Factor 
+
+The STL decomposition of the market factor @fig-market-stl reveals a smooth and persistent upward trajectory in the trend component, while the seasonal fluctuations are of relatively minor magnitude. The remainder term is dominated by low-level noise with occasional shocks, aligning with major economic events such as the Global Financial Crisis (2008), the end of the mining investment boom (2012), and the COVID-19 pandemic (2020). These observations suggest that the market factor is primarily trend-driven, with limited regular seasonality but distinct structural shifts.
+
+```{r u-stl}
+#| label: fig-market-stl 
+#| fig-cap: STL decomposition of the market factor, highlighting a dominant upward trend with minor seasonal fluctuations and occasional shocks.
+#| fig-pos: H
+
+mkt_stl <- factor_trends |> 
+  model(stl = STL(market))
+
+mkt_stl |> 
+  components() |> 
+  autoplot() +
+  labs(title = "STL Decomposition of Market Factor")
+```
+
+The ACF and PACF plots of the national market factor (@fig-market-acf-pacf) reveal strong persistence and a slow decay in autocorrelation, characteristic of a highly non-stationary process dominated by long-term trends rather than cyclical variation. The ACF remains positive and close to unity across multiple lags, while the PACF displays a sharp initial spike followed by gradual tapering, confirming the need for differencing to achieve stationarity. Accordingly, the differencing order is fixed at $d = 1$, both to remove the stochastic trend statistically and to remain consistent with standard economic interpretations, where housing price levels are typically modelled as integrated of order one $I(1)$ processes reflecting cumulative growth over time as discussed by Hyndman and Athanasopoulos (2021) [@hyndman2021].
+
+```{r u-acf-pacf}
+#| label: fig-market-acf-pacf
+#| fig-cap: ACF and PACF plots of the market factor, indicating strong persistence and non-stationarity dominated by long-term trends.
+#| fig-pos: H
+
+ggtsdisplay(factor_trends$market, main = "ACF and PACF with Market Factor")
+```
+
+In summary, the market factor exhibits non-stationary behaviour, dominated by a sustained upward trajectory and intermittent fluctuations across the observation period. To address the stochastic trend, the differencing order is set to one. A random walk with drift is employed as the benchmark model, with additional ARIMA variants-incorporating seasonal and piecewise structures-evaluated for comparison. Fourier terms are included to account for irregular yet recurring variations that lack a consistent seasonal pattern.
+
+```{r fit-u-model}
+# Function to add dummies 
+add_pw <- function(df) {
+  df |>
+    mutate(
+      ym = yearmonth(month_date),
+      # step dummies
+      step2008 = as.integer(ym >= yearmonth("2008 Jan")),
+      step2012 = as.integer(ym >= yearmonth("2012 Jan")),
+      step2020_03 = as.integer(ym >= yearmonth("2020 Mar")),
+      # ramp: months since Mar 2020 
+      ramp2020 = pmax(0L, as.integer(ym - yearmonth("2020 Mar"))),
+      # pulse: only in Apr 2020
+      pulse2020_04 = as.integer(ym == yearmonth("2020 Apr"))
+    ) |>
+    select(-ym)
+}
+
+train_mkt <- train_mkt |>
+  as_tsibble(index = month_date) |>
+  add_pw()
+
+# Candidates of models 
+fit_mkt <- train_mkt |> 
+  model(
+    autoarima = ARIMA(market),
+    rw_drift  = ARIMA(market ~ 1 + pdq(0,1,0)),
+    arima211  = ARIMA(market ~ 1 + fourier(K = 2) + pdq(2,1,1)),
+    arima110  = ARIMA(market ~ 1 + fourier(K = 2) + pdq(1,1,0)),
+    arima111  = ARIMA(market ~ 1 + fourier(K = 2) + pdq(1,1,1)),
+    sarima211 = ARIMA(market ~ 1 + pdq(2,1,1) + PDQ(1,0,0)),
+    piecewise = ARIMA(market ~ 1 + pdq(1,1,1) + step2008 + step2012 + ramp2020),
+    step = ARIMA(market ~ fourier(K = 2) + step2020_03 + pulse2020_04 + pdq(2,1,1))
+  ) 
+```
+
+```{r u-aicc-lb, eval = FALSE}
+# Result in following kable 
+fit_mktlong <- fit_mkt |>
+  pivot_longer(cols = everything(), names_to = "model_name", values_to = "model_fit")
+
+dof_lookup <- tibble(
+  model_name = c("autoarima", "rw_drift", "arima211", "arima110", "arima111", "sarima211", "piecewise", "step"),
+  dof = c(NA_integer_, 0, 7, 5, 6, 4, 5, 9)
+)
+
+# Extract model dof 
+lb_tbl_mkt <- fit_mktlong |>
+  left_join(dof_lookup, by = "model_name") |>
+  mutate(
+    lb_test = map2(model_fit, dof, ~{
+      augment(.x) |>
+        features(.innov, ljung_box, lag = 12, dof = .y)
+    })
+  ) |>
+  unnest(lb_test) |>
+  mutate(lb_pvalue = format(lb_pvalue, scientific = FALSE, digits = 2)) |> 
+  select(model_name, lb_stat, lb_pvalue) |>
+  arrange(desc(lb_pvalue)) 
+
+glance(fit_mkt) |> arrange(AICc)
+```
+
+```{r u-model-tbl}
+#| label: tbl-market-models
+#| tbl-cap: Candidate forecasting models for the market factor with fit statistics and residual diagnostics.
+#| tbl-pos: H
+
+market_models <- data.frame(
+  Model = c(
+    "autoarima",
+    "rw_drift",
+    "arima110",
+    "arima111",
+    "arima211",
+    "sarima211",
+    "piecewise",
+    "step"
+  ),
+  AICc = c(
+    -3001.47,
+    -2445.04,
+    -3005.60,
+    -3004.12,
+    -3002.03,
+    -2985.13,
+    -2981.34,
+    -3011.58
+  ),
+  `Ljung-Box p-value` = c(
+    NA,
+    0.0000,
+    0.0003,
+    0.0002,
+    0.00006,
+    0.0067,
+    0.0003,
+    0.0000013
+  ),
+  Consideration = c(
+    "Automatic ARIMA selection benchmark.",
+    "Baseline random walk with drift capturing persistent trend.",
+    "ARIMA(1,1,0) with Fourier (K = 2) for trend and weak high-frequency variation.",
+    "ARIMA(1,1,1) with Fourier (K = 2) capturing moderate short-term dependence.",
+    "ARIMA(2,1,1) with Fourier (K = 2) modelling complex short-term dynamics.",
+    "Seasonal ARIMA extension with yearly persistence term.",
+    "Piecewise specification capturing structural breaks (2008, 2012, 2020).",
+    "ARIMA(2,1,1) with Fourier and COVID-19 step/pulse interventions."
+  )
+)
+
+kable(market_models, "latex", booktabs = TRUE, linesep = "") |>
+  kable_styling(latex_options = "hold_position", full_width = FALSE) |>
+  column_spec(2, width = "2cm") |>
+  column_spec(3, width = "3cm") |>
+  column_spec(4, width = "8cm") 
+```
+
+The candidate model specifications and their corresponding fit diagnostics are summarised in @tbl-market-models. Among these, two models demonstrated notably strong performance. The first is an ARIMA(1,1,0) model with Fourier terms ($K = 2$) and a drift component, while the second combines Fourier terms ($K = 2$) with step and pulse intervention dummies within an ARIMA(2,1,1) structure. 
+
+After accounting for model-specific degrees of freedom, all models exhibit some degree of residual autocorrelation according to the Ljung–Box test. This outcome is expected, as the models are primarily designed to capture broad structural and cyclical patterns rather than every short-term fluctuation. Attempting to eliminate all autocorrelation would risk overfitting and reduce the models’ generalisability. Moreover, any remaining autocorrelation can be more effectively addressed in downstream modelling stages, such as ARIMAX or multivariate regression frameworks.
+  
+```{r u-residuals}
+#| label: fig-market-residuals
+#| fig-cap: Residual diagnostics for the ARIMA(1,1,0) model fitted to the market factor, showing no significant autocorrelation and a symmetric distribution.
+#| fig-pos: H
+
+fit_mkt |> 
+  select(arima110) |>
+  gg_tsresiduals() + 
+  ggtitle("Residual Diagnostics for ARIMA(1,1,0)",
+          subtitle = "Model fit on Market factor shows mild autocorrelation")
+```
+  
+The ARIMA(1,1,0) with Fourier terms and drift is ultimately selected as the preferred specification. Among the models without intervention dummies, it achieves the lowest AICc while maintaining a parsimonious structure, thereby enhancing interpretability. The exclusion of explicit seasonal terms aligns with the earlier conclusion that seasonality is weak and not systematically identifiable in this context. Residual diagnostics @fig-market-residuals further support this choice, as the residual series displays no significant or persistent autocorrelation, with most spikes within the significance bounds and a roughly symmetric, zero-centred distribution.
+
+## Forecasting the Mining Factor 
+
+The mining factor fluctuates around zero and exhibits mean-reverting behaviour, indicating the absence of a persistent long-term trend. As shown in @fig-mining-stl, seasonal effects are present but remain relatively consistent across years, while broader multi-year fluctuations highlight the need for a more flexible seasonal specification. The series reflects the dynamics of the resource boom, which can be interpreted as a one-off structural adjustment rather than a permanent driver—characterised by a sharp surge during the 2000s mining expansion, a collapse around 2012, and subsequent stagnation in the following years.
+
+```{r ps-stl}
+#| label: fig-mining-stl 
+#| fig-cap: STL decomposition of the mining factor, revealing mean-reverting behaviour with a significant structural shift during the mining boom period.
+#| fig-pos: H
+
+mining_stl <- factor_trends |> 
+  model(stl = STL(mining))
+
+mining_stl |> 
+  components() |> 
+  autoplot() +
+  labs(title = "STL Decomposition of Mining Factor")
+```
+
+The ACF and PACF of the mining factor @fig-mining-acf-pacf show slow, oscillatory decay, indicating medium-term persistence and cyclical behaviour rather than a strong trend. The PACF’s alternating signs suggest a damped cycle consistent with mean reversion around a stable long-run mean. This supports modelling the series with low differencing and flexible cyclical terms to capture mining-related fluctuations.
+
+```{r ps-acf-pacf}
+#| label: fig-mining-acf-pacf
+#| fig-cap: ACF and PACF plots of the mining factor, indicating potential non-stationarity influenced by structural shifts.
+#| fig-pos: H
+
+ggtsdisplay(factor_trends$mining, main = "ACF and PACF with Mining Factor")
+```
+
+The preceding exploratory plots provide mixed evidence regarding the stationarity of the mining factor, leaving its underlying stochastic properties uncertain. Although the mining factor appears to exhibit mean-reverting behaviour, the presence of a prolonged structural shift suggests potential non-stationarity. To formally assess this, we applied the Augmented Dickey–Fuller (ADF) and KPSS tests, along with the Zivot–Andrews (ZA) test, to the mining factor.
+
+The ADF and KPSS tests evaluate the presence of a unit root and stationarity around a deterministic level or trend. As shown in @tbl-stationary-test, both tests failed to reject the null hypothesis, indicating that the mining factor is non-stationary. However, the Zivot–Andrews test, which accounts for a single endogenous structural break, rejected the null of a unit root, suggesting that the mining factor becomes stationary once structural breaks are considered.
+
+```{r stationary-test, eval = FALSE}
+# Result in following kable 
+ur.df(factor_trends$mining, type="drift", lags=12) 
+kpss.test(factor_trends$mining, null="Level")
+ur.za(factor_trends$mining, model = "both") 
+```
+
+```{r stationary-tbl}
+#| label: tbl-stationary-test
+#| tbl-cap: Results of unit root and stationarity tests for the mining factor. Zivot–Andrew test shows stationarity after accounting for structural breaks.
+#| tbl-pos: H
+
+test_results <- data.frame(
+  Test = c("Augmented Dickey–Fuller", "KPSS", "Zivot–Andrews"),
+  Statistic = c(-2.0117, 1.1128, -4.9751),
+  p_value = c(NA, 0.01, NA),
+  Interpretation = c(
+    "Non-stationary (fail to reject H0)",
+    "Non-stationary (reject H0)",
+    "Stationary with one structural break (reject H0)"
+  )
+)
+
+kable(test_results, caption = "Unit root and stationarity test results for the mining factor.")
+```
+
+To address this, we treat the boom as a temporary structural shock. We introduce a dummy variable (set to 1 during the boom/decline period and 0 otherwise) when modelling the mining factor, and then forecast only the residual stationary component. This approach effectively assumes that another boom of comparable scale is unlikely.
+
+The boom and decline phases were identified using the `breakpoints` function from the `strucchange` package, which detected three structural breaks in the series. The segment containing the global peak was classified as the “boom” period, followed by the “decline” period. These periods were then encoded into dummy variables for use in the modelling process, essentially fitting an ARIMA model to the residuals after accounting for the boom and decline periods. 
+
+```{r detect-ps-break}
+# Partition the series into boom and decline windows based on structural breaks
+ps_zoo <- zoo(factor_trends$mining, order.by = factor_trends$month_date)
+y  <- coredata(ps_zoo)
+ti <- index(ps_zoo)
+n  <- length(y)
+
+# Three trend breaks 
+bp_tr <- breakpoints(ps_zoo ~ time(ps_zoo), breaks = 3)
+
+# Keep the breaks that actually exist 
+idx <- bp_tr$breakpoints
+idx <- idx[!is.na(idx)]
+
+# Segment boundaries
+cuts <- c(0, idx, n) 
+
+# Locate the global peak and the segment that contains it
+peak_i <- which.max(y)
+seg_id <- findInterval(peak_i, cuts) 
+
+# Boom = the whole peak segment, Decline = from end of peak segment to the next boundary
+boom_start <- ti[cuts[seg_id]   + 1]
+boom_end <- ti[cuts[seg_id+1]]
+decline_start <- boom_end
+decline_end <- ti[cuts[pmin(seg_id + 2, length(cuts))]]
+
+# Create dummies
+mining_df <- factor_trends |> 
+  select(month_date, mining) |> 
+  mutate(
+    boom_dummy = as.integer(month_date >= boom_start & month_date <= boom_end),
+    decline_dummy = as.integer(month_date > decline_start & month_date <= decline_end))
+
+
+# Fitted piecewise trend for visual check
+fit_tr <- fitted(bp_tr, breaks = length(idx))
+
+# Plot 
+ggplot(mining_df, aes(month_date, mining)) +
+  geom_line(colour = "black") +
+  geom_line(aes(y = as.numeric(fit_tr)), colour = "red", linewidth = 0.5) +
+  geom_vline(xintercept = as.Date(ti[idx]), linetype = 2, colour = "blue") +
+  annotate("rect", xmin = boom_start, xmax = boom_end, ymin = -Inf, ymax = Inf,
+           alpha = 0.12, fill = "forestgreen") +
+  annotate("rect", xmin = decline_start, xmax = decline_end, ymin = -Inf, ymax = Inf,
+           alpha = 0.12, fill = "orange") +
+  labs(
+    title = "Mining Time Series of Boom and Decline Windows",
+    subtitle = paste0(
+      "Boom: ", boom_start, " \u2192 ", boom_end,
+      "   |   Decline: ", decline_start, " \u2192 ", decline_end
+    ),
+    x = "Date", y = "Mining factor (Perth-Sydney Spread)"
+  ) +
+  theme_minimal()
+```
+
+```{r add-ps-dummy}
+boom_start <- yearmonth(boom_start)
+boom_end <- yearmonth(boom_end)
+decline_start <- yearmonth(decline_start)
+decline_end <- yearmonth(decline_end)
+
+# Add in dummies for mining boom and decline periods
+train_mining <- train_mining |> 
+  mutate(
+    boom = as.integer(month_date >= boom_start & month_date <= boom_end),
+    decline = as.integer(month_date >= decline_start & month_date <= decline_end)
+  )
+```
+
+We estimated multiple ARIMA specifications for the mining factor, incorporating boom and decline dummies as exogenous regressors. Model selection was guided by visual inspection of the ACF and PACF plots, as well as prior knowledge of the factor’s cyclical and mean-reverting characteristics.
+
+Among all candidate models, only the ARIMA(2,0,1) specification converged successfully and yielded well-behaved residuals. Simpler autoregressive models, such as AR(1) or AR(2), violated the stationarity condition, while the inclusion of the MA(1) term in ARIMA(2,0,1) stabilised the process and ensured that the AR coefficients remained within the stationary region. The MA(1) component also captured short-term fluctuations not explained by the boom and decline dummies, resulting in residuals that exhibited no significant autocorrelation. This is confirmed by the Ljung–Box test ($p = 0.700$), indicating that the residuals can be regarded as white noise. In contrast, higher-order or alternative specifications either failed to converge or produced serially correlated residuals.
+
+```{r fit-ps-model}
+# Fit ARIMA with residuals after accounting for the dummies 
+fit_mining <- train_mining |>
+  model(
+    arima201 = ARIMA(mining ~ boom + decline + pdq(2,0,1)), 
+    arima100 = ARIMA(mining ~ boom + decline + pdq(1,0,0)),
+    arima200 = ARIMA(mining ~ boom + decline + pdq(2,0,0)),
+    arima101 = ARIMA(mining ~ boom + decline + pdq(1,0,1))
+  ) |> 
+  select(arima201)
+
+# Added in description 
+#lb_tbl_mining <- fit_mining |>
+ # augment() |>
+# features(.innov, ljung_box, lag = 12, dof = 3)
+```
+
+The residuals are well-behaved, fluctuating randomly around zero with no autocorrelation, comfirmed by ljung-box test. Their near-normal distribution suggests the model captures the mining factor’s dynamics effectively.
+
+```{r ps-residuals}
+#| label: fig-mining-residual 
+#| fig-cap: Residual diagnostics for the ARIMA(2,0,1) model fitted to the mining factor, showing no significant autocorrelation and a symmetric distribution.
+#| fig-pos: H
+
+fit_mining |> 
+  gg_tsresiduals() + 
+  ggtitle("Residual Diagnostics for ARIMA(2,0,1)",
+          subtitle = "Model fit on Mining factor shows no autocorrelation")
+```
+
+## Forecast Performance 
+
+For the forecasting stage, we use the best-performing models (ARIMA(1,1,0) with Fourier terms ($K = 2$) for the markets factor and ARIMA(2,0,1) for the mining factor identified earlier to project values 10 years ahead (120 months). We generate forecasts with prediction intervals at both 80% and 95%. These intervals show the range in which future values are likely to fall, giving us a measure of uncertainty, an 80% interval means there is an 8 in 10 chance that the true value will lie within that range.
+
+For evaluation, we set aside one year of data as a test set. Although a typical split is about 20% of the dataset, our series only spans 29 years, so using 20% would cut off too much valuable information for forecasting. A one-year test period strikes a better balance.
+
+The forecasts indicate that the market trend @fig-market-pi is expected to rise, with an 80% prediction interval width of 0.9350, reflecting higher uncertainty. In contrast, the mining spread @fig-mining-pi shows a flatter path, with an 80% interval width of 0.6107. This narrower range reflects greater stability, largely because we excluded the one-off boom and decline period, which would otherwise make the series more volatile.
+
+```{r prediction-interval-u}
+#| label: fig-market-pi
+#| fig-cap: Forecasts of the market factor with 80% prediction intervals, showing a sustained upward trajectory accompanied by widening uncertainty bands.
+#| fig-pos: H
+
+# Forecast - 10 years
+h <- 120
+fit_mkt <- fit_mkt |> select(arima110)
+last_idx <- max(train_mining$month_date)  
+future_mining <- tibble(
+  month_date = last_idx + (1:h),
+  boom = 0L,
+  decline = 0L
+) |> 
+  as_tsibble(index = month_date)
+
+fc_mkt  <- fabletools::forecast(fit_mkt,  h = h, level = c(80, 95))
+
+# Produce fan with for U 
+fcbands_mkt <- fc_mkt |> 
+  as_tibble() |> 
+  mutate(
+    lo80 = quantile(market, 0.10),
+    hi80 = quantile(market, 0.90),
+    lo95 = quantile(market, 0.025),
+    hi95 = quantile(market, 0.975),
+    width80 = hi80 - lo80,
+    width95 = hi95 - lo95
+  ) |> 
+  select(.model, month_date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
+
+last_row_mkt <- fcbands_mkt |> filter(month_date == max(month_date))
+
+# Forecast plot with fan width at last obs 
+autoplot(
+  fc_mkt,
+  data = factor_trends |> 
+    filter(month_date <= max(train_mkt$month_date))
+) +
+  geom_segment(
+    data = last_row_mkt,
+    aes(x = month_date, xend = month_date, y = lo80, yend = hi80, colour = .model),
+    linewidth = 0.8
+  ) +
+  geom_text(
+    data = last_row_mkt,
+    aes(x = month_date, y = hi80, label = sprintf("w80 = %.4f", width80), colour = .model),
+    vjust = -0.6, size = 2.5
+  ) +
+  labs(
+    title = "Forecasts of Market Trend with 80% Prediction Interval",
+    subtitle = "The forecasts start after the training window and show widening uncertainty bands"
+  )
+```
+
+```{r prediction-interval-ps}
+#| label: fig-mining-pi
+#| fig-cap: Forecasts of the mining factor with 80% prediction intervals, showing stable projections due to exclusion of the boom/decline period.
+#| fig-pos: H
+
+fc_mining <- fabletools::forecast(fit_mining, new_data = future_mining , h = h, level = c(80, 95))
+# Produce fan width for mining 
+fcbands_mining <- fc_mining  |> 
+  as_tibble() |> 
+  mutate(
+    lo80 = quantile(mining, 0.10),
+    hi80 = quantile(mining, 0.90),
+    lo95 = quantile(mining, 0.025),
+    hi95 = quantile(mining, 0.975),
+    width80 = hi80 - lo80,
+    width95 = hi95 - lo95
+  ) |> 
+  select(.model, month_date, mean = `.mean`, lo80, hi80, lo95, hi95, width80, width95) 
+
+last_row_mining <- fcbands_mining |> filter(month_date == max(month_date))
+
+autoplot(fc_mining, 
+         data = factor_trends |> 
+           filter(month_date <= max(train_mining$month_date))) +
+  geom_segment(data = last_row_mining,
+               aes(x = month_date, xend = month_date, y = lo80, yend = hi80, colour = .model),
+               linewidth = 0.8) +
+  geom_text(data = last_row_mining,
+            aes(x = month_date, y = hi80,
+                label = sprintf("w80 = %.4f", width80),
+                colour = .model),
+            vjust = -0.6, size = 2.5) + 
+  labs(title = "Forecasts of Mining Trend with 80% Prediction Interval",
+       subtitle = "Excluding the boom/decline period produces more stable forecasts")
+```
+
+The test results @tbl-forecast-accuracy show that the chosen model for the market trend performs well, with low error (RMSE = 0.056, small relative to the series scale). For the mining trend, the model with boom and decline dummies yields forecasts with an average error of about 7%, which is reasonable given the mining factor’s higher volatility and cyclical nature. Despite minor residual autocorrelation, both models perform robustly overall.
+
+```{r test-set-performance}
+#| label: tbl-forecast-accuracy
+#| tbl-cap: Forecast accuracy on the test set for market and mining factors, showing low RMSE and MAE values.
+#| tbl-pos: H
+
+acc_mkt <- accuracy(fc_mkt, test_mkt) |>
+  select(.model, .type, RMSE, MAE)
+
+acc_mining <- accuracy(fc_mining, test_mining) |>
+  select(.model, .type, RMSE, MAE)
+
+# Add labels
+acc_mkt  <- acc_mkt  |> mutate(series = "Market")
+acc_mining <- acc_mining |> mutate(series = "Mining")
+
+# Combine tables 
+acc_all <- bind_rows(acc_mkt, acc_mining) |>
+  relocate(series, .model, .type)
+
+kable(acc_all, title = "Forecast accuracy on test set for market and mining factors") 
+```
+
+```{r save-forecast-df}
+# Convert forecasts to tibble
+df_fc_mkt  <- as_tibble(fcbands_mkt)
+df_fc_mining <- as_tibble(fcbands_mining)
+
+df_fc <- df_fc_mkt |>
+  select(month_date, mean_mkt = mean, lo80_mkt = lo80, hi80_mkt = hi80,
+         lo95_mkt = lo95, hi95_mkt = hi95) |>
+  left_join(
+    df_fc_mining |>
+      select(month_date, mean_mining = mean, lo80_mining = lo80, hi80_mining = hi80,
+         lo95_mining = lo95, hi95_mining = hi95),
+    by = "month_date"
+  )
+```
+
+# Factor Model Application 
+
+The linear decomposition of local price indexes into common factors (@eq-factor-model) motivates a corresponding regression framework linking regional price indexes to these factors. This model aims to provide a simple yet informative representation of local housing performance and to quantify each region’s sensitivity to national and mining influences. The resulting coefficients offer insight into regional responses to aggregate market dynamics and help evaluate the model’s explanatory strength.
+
+The model is estimated in a static form, where each region’s sensitivity to the underlying factors is assumed constant across the full sample period. This simplification overlooks potential temporal variation in regional responses but nonetheless provides a valuable baseline for understanding long-term dynamics. The subsequent analysis examines whether this static specification remains stable and sufficiently flexible to approximate local house price movements across three key dimensions: 
+
+* Model fit: $R^2$ measures how much of the variation in regional house prices is explained by the factors, where a higher $R^2$ indicates that the model captures a larger share of systematic price movements across regions.
+
+* Residual autocorrelation: Examining the residuals helps identify whether the model has adequately accounted for temporal dependencies. If residual autocorrelation is present, then some dynamic structure remains unexplained and should be taken into account. 
+
+* Coefficient distribution: The distribution of estimated coefficients across regions reveals how sensitively different areas respond to the common factors. This comparison provides insight into the geographic heterogeneity of market and mining influences.
+
+```{r ols-reg}
+# Run and build regression 
+fit_reg_table <- function(idx_long, region_col, region_level_label) {
+  stopifnot(all(c("month_date", region_col, "value") %in% names(idx_long)))
+  
+  idx_long |>
+    inner_join(factor_trends, by = "month_date") |>
+    group_by(.data[[region_col]]) |>
+    group_modify(\(.x, .y) {
+      .x <- tidyr::drop_na(.x, value, market, mining, lifestyle)
+      if (nrow(.x) < 10) return(tibble(
+        alpha = NA_real_, market = NA_real_, mining = NA_real_,
+        lifestyle = NA_real_, r2 = NA_real_, durbin_watson = NA_real_
+      ))
+      fit <- lm(value ~ market + mining + lifestyle, data = .x)
+      coefs <- coef(fit)
+      r2 <- summary(fit)$r.squared
+      dw <- tryCatch(as.numeric(lmtest::dwtest(fit)$statistic[["DW"]]),
+                        error = \(e) NA_real_)
+      tibble(
+        alpha = unname(coefs[["(Intercept)"]]),
+        market = unname(coefs[["market"]]),
+        mining = unname(coefs[["mining"]]),
+        lifestyle = unname(coefs[["lifestyle"]]),
+        r2 = r2,
+        durbin_watson = dw
+      )
+    }) |>
+    ungroup() |>
+    rename(region = !!region_col) |>
+    mutate(region_level = region_level_label) |>
+    select(region, alpha, r2, durbin_watson, market, mining, lifestyle, region_level)
+}
+
+# Prepare city indexes
+city_long <- city_indexes |>
+  pivot_longer(
+    cols = -month_date,
+    names_to = "city",
+    values_to = "value"
+  )
+
+# Prepare SA4 indexes
+ sa4_long <- sa4_indexes |>
+   clean_names() |> 
+   pivot_longer(
+     cols = -month_date,
+     names_to = "region",
+     values_to = "value")
+
+# Build regression coefficient table 
+reg_coefs_city <- fit_reg_table(city_long, region_col = "city",  region_level_label = "major_city")
+reg_coefs_sa4  <- fit_reg_table(sa4_long,  region_col = "region", region_level_label = "sa4_name")
+
+reg_coefs_new <- bind_rows(reg_coefs_city, reg_coefs_sa4)
+```
+
+## Model Fit 
+
+The average $R^2$ across all regions is 0.985, indicating that the factor model accounts for the vast majority of variation in local house price movements. Some regional variation is evident, suggesting that certain areas exhibit distinct dynamics not fully captured by the common factors. As shown in @tbl-r2-city, the highest $R^2$ values are concentrated in the major east coast capitals and their surrounding metropolitan belts, whereas lower values tend to occur in smaller or resource-dependent markets.
+
+```{r model-r2-city}
+#| label: tbl-r2-city
+#| tbl-cap: The table shows that the model fit is strongest in large east coast capitals, while weaker in smaller and resource-exposed markets.
+#| tbl-pos: H
+
+reg_city <- reg_coefs_new |> filter(region_level == "major_city")
+
+# Rank the major cities by r2 and print top and bottom 10 
+ranked_city <- reg_city |>
+  arrange(desc(r2)) |>
+  mutate(rank = row_number())
+
+top10_city <- ranked_city |>
+  slice_head(n = 5) |>
+  transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
+
+bottom10_city <- ranked_city |>
+  slice_tail(n = 5) |>
+  arrange(r2) |>
+  transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
+
+tbl_rank_city <- top10_city |>
+  full_join(bottom10_city, by = "row", suffix = c("_Top", "_Bottom")) |>
+  select(Rank_Top, Region_Top, R2_Top, Rank_Bottom, Region_Bottom, R2_Bottom)
+
+kable(
+  tbl_rank_city,
+  format = "latex", booktabs = TRUE, longtable = TRUE,
+  caption = "Top 5 and Bottom 5 Major City and Area by R²",
+  digits = 4,
+  col.names = c("Rank", "Region", "R²", "Rank", "Region", "R²"),
+  escape = TRUE
+) |>
+  kable_styling(
+    full_width = FALSE, position = "center",
+    latex_options = c("repeat_header", "hold_position", "scale_down")
+  ) |>
+  add_header_above(c("Top 5" = 3, "Bottom 5" = 3)) |>
+  column_spec(1, latex_column_spec = "p{0.08\\\\textwidth}") |>
+  column_spec(2, latex_column_spec = "p{0.32\\\\textwidth}") |>
+  column_spec(3, latex_column_spec = "p{0.10\\\\textwidth}") |>
+  column_spec(4, latex_column_spec = "p{0.08\\\\textwidth}") |>
+  column_spec(5, latex_column_spec = "p{0.32\\\\textwidth}") |>
+  column_spec(6, latex_column_spec = "p{0.10\\\\textwidth}")
+```
+
+Examining the results at the SA4 level @tbl-r2-sa4 offers a more granular view of model performance. The pattern remains consistent. Regions with the lowest fit are predominantly located in Western Australia and Queensland, reflecting their greater exposure to mining-related volatility.
+
+```{r model-r2-sa4}
+#| label: tbl-r2-sa4
+#| tbl-cap: The table highlights that model performance declines in mining-exposed areas of Western Australia and Queensland, consistent with the heterogeneity observed across regional markets.
+#| tbl-pos: H
+
+# Filter the SA4 regions in the coefficient data 
+reg_sa4 <- reg_coefs_new |> filter(region_level == "sa4_name")
+
+# Rank the regions by r2 and print top and bottom 10 
+ranked_sa4 <- reg_sa4 |>
+  arrange(desc(r2)) |>
+  mutate(rank = row_number())
+
+top10_sa4 <- ranked_sa4 |>
+  slice_head(n = 10) |>
+  transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
+
+bottom10_sa4 <- ranked_sa4 |>
+  slice_tail(n = 10) |>
+  arrange(r2) |>
+  transmute(row = row_number(), Rank = rank, Region = region, R2 = r2)
+
+tbl_rank_sa4 <- top10_sa4 |>
+  full_join(bottom10_sa4, by = "row", suffix = c("_Top", "_Bottom")) |>
+  select(Rank_Top, Region_Top, R2_Top, Rank_Bottom, Region_Bottom, R2_Bottom)
+
+kable(
+  tbl_rank_sa4,
+  format = "latex", booktabs = TRUE, longtable = TRUE,
+  caption = "Top 10 and Bottom 10 SA4 Regions by R²",
+  digits = 4,
+  col.names = c("Rank", "Region", "R²", "Rank", "Region", "R²"),
+  escape = TRUE
+) |>
+  kable_styling(
+    full_width = FALSE, position = "center",
+    latex_options = c("repeat_header", "hold_position", "scale_down")
+  ) |>
+  add_header_above(c("Top 10" = 3, "Bottom 10" = 3)) |>
+  column_spec(1, latex_column_spec = "p{0.07\\\\textwidth}") |>
+  column_spec(2, latex_column_spec = "p{0.36\\\\textwidth}") |>
+  column_spec(3, latex_column_spec = "p{0.07\\\\textwidth}") |>
+  column_spec(4, latex_column_spec = "p{0.07\\\\textwidth}") |>
+  column_spec(5, latex_column_spec = "p{0.36\\\\textwidth}") |>
+  column_spec(6, latex_column_spec = "p{0.07\\\\textwidth}")
+```
+
+Both SA4 regions and major cities exhibit highly concentrated distributions of $R^2$ values, the mean is nearly identical between the two groups, however, the distribution for major cities shows slightly lower dispersion, implying that urban housing markets behave more uniformly in response to the common factors, whereas regional SA4 markets display marginally greater heterogeneity in their degree of fit @fig-r2-comp.
+
+```{r model-r2-comp}
+#| label: fig-r2-comp
+#| fig-cap: Comparison of R² distributions between SA4 regions and major cities, indicating slightly higher uniformity in urban markets.
+#| fig-pos: H
+
+dist_comp <- bind_rows(
+  reg_sa4 |> transmute(group = "SA4 (n=88)", r2),
+  reg_city |> transmute(group = "Major cities (n=15)", r2)
+)
+ggplot(dist_comp, aes(x = r2, y = group)) +
+  ggdist::stat_slab(aes(thickness = after_stat(pdf)),
+                    adjust = 1,
+                    alpha = 0.5) +
+  ggdist::stat_pointinterval(.width = c(0.5, 0.8, 0.95), point_size = 1.8) +
+  scale_x_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(title = "Factor Model R² distribution: SA4 vs major cities", x = "R²", y = NULL) +
+  theme_minimal(base_size = 12)
+```
+
+The choropleth @fig-r2-choro reinforces the findings from the summary table. The east-coast capitals and coastal belts from Melbourne through Sydney into the South-East of Queensland show the strongest fit with most regional New South Wales and Victoria are also high. While fit weakens inland and to the west, notably across Western Australia and along Queensland’s mining belts. The dark purple areas mark the lowest $R^2$ and are typically remote and resource-exposed regions with possible boom-bust timing and sparse transactions that our three factors don’t fully capture.
+
+```{r model-r2-dist-plot}
+#| label: fig-r2-choro
+#| fig-cap: Choropleth of R² distribution across SA4 regions, highlighting stronger model fit in east-coast capitals and weaker fit in mining-exposed areas of Western Australia and Queensland.
+#| fig-pos: H
+
+# Match names between reg_sa4 and sa4 shapefile
+norm <- function(x) {
+  x |>
+    str_to_upper() |>
+    str_replace_all("&", "AND") |>
+    str_replace_all("[[:punct:]]", " ") |>
+    str_squish()
+}
+
+# Filter city and geo coord 
+major_cities <- c(
+  "australian_capital_territory",
+  "greater_adelaide",
+  "greater_brisbane",
+  "greater_darwin",
+  "greater_hobart",
+  "greater_melbourne",
+  "greater_perth",
+  "greater_sydney"
+)
+
+city_r2 <- reg_coefs_new |>
+  filter(region %in% major_cities) |>
+  transmute(city = region, r2)
+
+city_coords <- tibble::tribble(
+  ~city, ~lon, ~lat,
+  "greater_sydney", 151.21, -33.87,
+  "greater_melbourne", 144.96, -37.81,
+  "greater_brisbane", 153.03, -27.47,
+  "greater_perth", 115.86, -31.95,
+  "greater_adelaide", 138.60, -34.93,
+  "greater_hobart", 147.33, -42.88,
+  "greater_darwin", 130.84, -12.46,
+  "australian_capital_territory", 149.13, -35.28
+)
+
+city_mapdata <- city_r2 |> left_join(city_coords, by = "city")
+
+# Prepare the 88 regions 
+keep88 <- reg_sa4 |>
+  mutate(region_norm = norm(region)) |>
+  distinct(region_norm)
+
+# Clean shapefile + keep regions + join r2 
+sa4_r2 <- sa4 |>
+  mutate(region_norm = norm(SA4_NAME21)) |>
+  # drop empty geometries and special APS areas
+  filter(!st_is_empty(geometry)) |>
+  filter(!str_detect(region_norm, "^MIGRATORY\\s+OFFSHORE\\s+SHIPPING"),
+         !str_detect(region_norm, "^NO\\s+USUAL\\s+ADDRESS")) |>
+ semi_join(keep88, by = "region_norm") |> # Keep only the 88 sa4
+  left_join( # Join r2 
+    reg_sa4 |>
+      mutate(region_norm = norm(region)) |>
+      select(region_norm, r2),
+    by = "region_norm"
+  )
+
+# Plot the r2 distribution 
+ggplot() +
+  geom_sf(data = sa4_r2, aes(fill = r2), linewidth = 0.1, colour = "grey70") +
+  scale_fill_viridis_c(name = "SA4 R²", labels = percent) +
+  geom_point(data = city_mapdata, aes(x = lon, y = lat), colour = "red", size = 1) +
+  ggrepel::geom_label_repel(
+  data = city_mapdata,
+  aes(x = lon, y = lat, label = paste0(city, "\n", scales::percent(r2, 0.01))),
+  size = 1.5, label.padding = unit(0.05, "lines"), label.r = unit(0.05, "lines"),    
+  label.size = 0.15, box.padding = 0.2, seed = 42) +
+  coord_sf() +
+  labs(title = "Factor Model R² Distribution across Cities & Regions") +
+  theme_void(base_size = 12)
+```
+
+## Residual Autocorrelation
+
+At this stage, the model does not account for temporal dependence in the residuals. Although it explains a substantial proportion of the variance in both city-level and regional indexes, the inherently trending and serially correlated nature of housing prices leads to residuals exhibiting pronounced positive autocorrelation. This is reflected in the Durbin–Watson statistics, which are consistently close to zero across all regions. Major cities cluster between 0.02 and 0.05, while SA4 regions show a slightly wider range extending up to 0.2, still well below the benchmark value of 2 @fig-dw. These results highlight the limitations of a static regression framework when time-series dynamics are not explicitly modelled.
+
+```{r dw-stat}
+#| label: fig-dw 
+#| fig-cap: Violin plot of Durbin–Watson statistics by region type, illustrating pronounced positive autocorrelation in residuals across all areas.
+#| fig-pos: H
+
+ggplot(reg_coefs_new, aes(x = region_level, y = durbin_watson, fill = region_level)) +
+  geom_violin(trim = FALSE, alpha = 0.6) +
+  geom_boxplot(width = 0.1, outlier.shape = NA) +
+  labs(title = "Durbin–Watson by region type",
+       x = "", y = "Durbin–Watson") +
+  coord_cartesian(ylim = c(0, 0.25)) + 
+  theme_minimal() 
+```
+
+## Coefficient Pattern
+
+Examining coefficient patterns revealing whether reggional dynamics move uniformly with the national trend or diverge due to mining influences. The distribution of market coefficients is tightly centred around 1.0 with relatively little variation. Therefore most regions respond in a similar way to the national housing trend. In contrast, the mining coefficients are far more dispersed with a long right tail and several extreme outliers, suggesting that exposure to mining-related dynamics differs substantially across regions.
+
+```{r coef-density}
+#| label: fig-coef-density
+#| fig-cap: Density histogram of estimated coefficients for market and mining factors, highlighting the tight clustering of market coefficients around 1.0 and the greater dispersion of mining coefficients.
+#| fig-pos: H
+
+reg_coef_long <- reg_coefs_new |>
+  select(region_level, market, mining) |>
+  pivot_longer(c(market, mining),
+               names_to = "factor", values_to = "coef")
+
+# Density histogram 
+ggplot(reg_coef_long, aes(x = coef, fill = factor)) +
+  geom_histogram(aes(y = after_stat(density)),
+                 bins = 30, , colour = "white") +
+  geom_density(size = 0.5, fill = NA) +
+  facet_wrap(~factor, scales = "free_x") +
+  theme_minimal() +
+  theme(legend.position = "none") +
+  labs(x = "Coefficient", y = "Density",
+       title = "Distribution of Estimated Coefficient", 
+       subtitle = "Market coefficients are tightly clustered around 1.0, while mining coefficients show greater dispersion")
+```
+
+@fig-coef-pairwise shows the relationship between the estimated market and mining coefficients across all regions. The scatterplot in the lower-left panel reveals a clear negative association between the two factors: regions with stronger loadings on the national market factor tend to display weaker, or even negative, sensitivities to the mining factor. The red and blue densities represent the marginal distributions of coefficients for major cities and SA4 regions respectively. Their strong overlap indicates that both spatial levels exhibit similar patterns, with only minor differences in dispersion. The correlation coefficients confirm this consistency. Overall, the figure supports that the inverse trade-off between market and mining sensitivity is a systematic national pattern rather than an artefact of the level of spatial aggregation.
+
+```{r coef-pairwise}
+#| label: fig-coef-pairwise
+#| fig-cap: Pairwise plot of market and mining coefficients, showing a negative relationship between the two factors across regions, consistent across both major cities and SA4 areas.
+#| fig-pos: H
+
+# Pairwise
+cols <- c("market","mining")
+ggpairs(
+  reg_coefs_new,
+  columns = match(cols, names(reg_coefs_new)),
+  mapping = aes(colour = region_level),
+  upper = list(continuous = wrap("cor", size = 3)),
+  lower = list(continuous = wrap("smooth_loess", alpha = 0.6, size = 0.3)),
+  diag  = list(continuous = wrap("densityDiag", alpha = 0.6))
+) + 
+  labs(title = "Relationship Between Market and Mining Coefficients (Main cities in red, SA4 in blue)",
+       subtitle = "Regions more sensitive to the national market trend generally show lower sensitivity to mining dynamics") 
+```
+
+# Model Enhancement 
+
+The current static factor model exhibits notable residual autocorrelation and spatially uneven fit quality, particularly in mining-exposed regions. To enhance both model performance and adaptability, two methodological refinements were introduced, producing a more responsive specification that accounts for evolving regional relationships while maintaining statistical coherence. These refinements align with methodologies discussed by Stock and Watson (2020) [@stock2020], who demonstrate that ARIMAX modelling and expanding-window estimation can effectively address serial correlation and parameter drift in dynamic econometric contexts. The key enhancements are:
+
+* ARIMAX-based residual adjustment, which explicitly models temporal dependence in the errors. 
+
+* Time-varying estimation via expanding windows, allowing the regression coefficients to evolve with new data over time.
+
+## ARIMAX-Based Residual Control
+
+The ARIMAX framework maintains fixed regression coefficients while addressing serial dependence in the residuals through an ARIMA process. In this context, the differencing order is constrained to zero to ensure that the analysis captures long-term co-movements between the dependent variable and the underlying factor trends, rather than focusing on short-term fluctuations.
+
+Several baseline specifications were tested through a grid search for the orders, and the optimal model was chosen by balancing AICc performance with Ljung–Box test results, ensuring that the residuals approximated white noise.
+
+As a result, @tbl-arimax-grid five ARIMAX models were selected and fitted across regions according to their individual time series dynamics. Among the 88 SA4 regions, 76 passed the Ljung–Box test, indicating that their residuals approximate white noise.
+
+```{r reg-arimax-search}
+#| label: tbl-arimax-grid
+#| tbl-cap: Summary of ARIMAX model selection across SA4 regions, showing the distribution of best-fitting models and their pass rates for the Ljung–Box test.
+#| tbl-pos: H
+
+# Define variables 
+x_df <- factor_trends |> select(month_date, market, mining, lifestyle)
+
+df_all <-  sa4_long |>
+  inner_join(x_df, by = "month_date") |>
+  arrange(region, month_date) |>
+  drop_na()
+
+# Candidates for ARIMAX orders 
+cands <- list(
+  c(0,0,0), c(1,0,0), c(0,0,1), c(1,0,1),
+  c(2,0,0), c(0,0,2), c(2,0,1), c(1,0,2), c(2,0,2)
+)
+
+# Fit per region, ranking by AIC and LB
+results <- df_all |>
+  group_by(region) |>
+  reframe({
+    dates <- month_date
+    y <- value
+    X <- as.matrix(pick(market, mining, lifestyle))
+    y_ts <- ts(y, frequency = 12, start = c(year(min(dates)), month(min(dates))))
+    n <- length(y)
+   # placeholders 
+    best <- NULL
+    best_AICc <- Inf
+    best_p <- NA
+    best_fit <- NULL
+    # fit on regions 
+    for (od in cands) {
+      fit <- try(Arima(y_ts, order = od, xreg = X, include.mean = TRUE, method = "ML"), silent = TRUE)
+      if (inherits(fit, "try-error")) next
+      k <- length(coef(fit))
+      aic <- AIC(fit)
+      aicc <- aic + (2 * k * (k + 1)) / pmax(n - k - 1, 1)
+      pval <- as.numeric(Box.test(residuals(fit), lag = 12, type = "Ljung-Box")$p.value)
+
+      if (aicc < best_AICc || (aicc == best_AICc && pval > best_p)) {
+        best_AICc <- aicc
+        best_p <- pval
+        best_fit <- fit
+        best <- paste(od, collapse = ",")
+      }
+    }
+    if (is.null(best_fit)) return(NULL)
+    b <- coef(best_fit)[c("market", "mining", "lifestyle")]
+    tibble(
+      best_model = paste0("ARIMAX(", best, ") d=0"),
+      AICc = best_AICc,
+      LB_p12 = best_p, #LB at lag 12 
+      market = unname(b[1]),
+      mining = unname(b[2]),
+      lifestyle = unname(b[3])
+    )
+  })
+
+arimax_grid_tbl <- results |> group_by(best_model) |> summarise(n = n(), ljung_box_pass_rate = mean(LB_p12 >= 0.05)) |> arrange(desc(ljung_box_pass_rate))
+kable(arimax_grid_tbl, title = "ARIMAX Model Selection Summary across SA4 Regions")
+
+reg_coefs_arimax <- results |> select(region, market, mining, lifestyle)
+```
+
+The coefficient distributions for the three factors across the two modelling frameworks (static OLS and ARIMAX) @fig-coef-compare reveal broadly consistent patterns. Both models yield strong, tightly clustered positive coefficients for the market factor, with nearly identical medians and narrow interquartile ranges, confirming a uniform national influence. For the mining factor, the medians remain close to zero under both specifications, however, the OLS model exhibits a wider dispersion and more positive outliers, whereas the ARIMAX approach produces more stable estimates once autocorrelation is controlled. The lifestyle factor displays similar distributions across models, though the ARIMAX coefficients are slightly more concentrated, indicating a mild attenuation of the lifestyle signal when temporal dependence is accounted for.
+
+These results suggest that national market forces exert a consistently strong influence on regional price dynamics regardless of model specification. Controlling for serial correlation reduces the apparent volatility of the mining factor—implying a more conservative estimation of its cyclical influence—while lifestyle effects remain modest and less regionally variable once time-dependent patterns are incorporated.
+
+```{r coef-compare}
+#| label: fig-coef-compare
+#| fig-cap: Boxplots comparing coefficient distributions for market, mining, and lifestyle factors between OLS and ARIMAX models, highlighting the impact of accounting for autocorrelation on coefficient stability.
+#| fig-pos: H
+
+# Compare coefficients: OLS & ARIMAX 
+reg_coefs_ols <- reg_coefs_new |> mutate(model_type = "OLS")
+reg_coefs_arimax <- reg_coefs_arimax |> mutate(model_type = "ARIMAX")
+
+reg_compare <- bind_rows(reg_coefs_ols, reg_coefs_arimax) |> 
+  select(region, model_type, market, mining, lifestyle) 
+
+reg_compare |>
+  pivot_longer(cols = c(market, mining, lifestyle),
+               names_to = "factor",
+               values_to = "estimate") |>
+  ggplot(aes(x = model_type, y = estimate, fill = model_type)) +
+  geom_boxplot(alpha = 0.7, outlier.alpha = 0.2) +
+  facet_wrap(~factor, scales = "free_y") +
+  labs(
+    title = "Coefficient Comparison: OLS vs ARIMAX",
+    x = NULL,
+    y = "Coefficient Value"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+```
+
+To further illustrate this, we compare factor coefficients for Melbourne and Sydney’s inner areas, along with Blacktown and the Central Coast @tbl-coef-compare, which are regions influenced by the mining and lifestyle factors. The ARIMAX model provides a more reliable fit by addressing autocorrelation, resulting in more stable and realistic factor sensitivities across regions. Overall, when time dependence is modelled with ARIMAX, the market sensitivity increases across all regions, while the absolute influence of the mining and lifestyle factors weakens: 
+
+* Market Factor: Each region becomes more tightly linked to the national housing cycle once autocorrelation is controlled for. For example, the Central Coast rises from 0.926 to 0.999, and Sydney–Inner South from 1.04 to 1.07.
+
+* Mining Factor: The negative mining effect softens everywhere (e.g., Sydney–Blacktown from -0.511 to -0.364), implying mining trend of the OLS came from persistent shocks rather than true long-run sensitivity.
+
+* Lifestyle Factor: The lifestyle effect also becomes less extreme, most notably in the Central Coast, where it drops slightly but remains positive, confirming its coastal lifestyle character, while capital and suburban areas stay negative.
+
+```{r coef-compare-example}
+#| label: tbl-coef-compare
+#| tbl-cap: Comparison of factor coefficients between OLS and ARIMAX models for selected regions, highlighting the effect of autocorrelation adjustment on sensitivity estimates.
+#| tbl-pos: H
+
+# Example: Melbourne vs. Sydney 
+reg_subset <- reg_compare |>
+  filter(region %in% c(
+    "melbourne_inner", 
+    "sydney_city_and_inner_south",
+    "sydney_blacktown", 
+    "central_coast"
+  )) |> 
+  arrange(region)
+
+reg_subset[] <- lapply(reg_subset, \(col) {
+  if (is.character(col)) gsub("\u2212", "-", col) else col
+})
+
+kable(reg_subset, 
+      caption = "Factor Coefficient Comparison: OLS vs ARIMAX for Selected Regions")
+```
+
+## Time-dependent Coefficients with Expending Window 
+
+The expanding window approach was used to assess the stability of model coefficients over time. By gradually extending the estimation sample, we tested whether the relationships between regional housing indices and key factors remained consistent as new data of the following years was added. The regression was refitted twice, first using data up to November 2022, and again including data up to November 2024. Comparing these two sets of coefficients allowed us to evaluate how much the estimated sensitivities of each factor changed when the sample expanded by two years.
+
+@tbl-coef-window results displays the average yearly change and standard deviation of coefficients across regions. The intercept and market factors show small but positive shifts, while mining and lifestyle remain nearly unchanged. This suggests that the overall influence of these factors on housing prices has been highly stable between 2022 and 2024. 
+
+```{r expending-window}
+#| label: tbl-coef-window 
+#| tbl-cap: Summary of coefficient changes between expanding window estimations up to 2022 and 2024, indicating strong stability in factor sensitivities over time.
+#| tbl-pos: H
+
+# Configuration 
+target <- "value"
+predictors <- c("market","mining","lifestyle")
+panel <- sa4_long |>
+  inner_join(factor_trends, by = "month_date") |> 
+  arrange(region, month_date) |> 
+  drop_na(all_of(c(target, predictors)))
+
+# Set up cutoff dates - two years apart 
+start_date <- as.Date("1995-02-01")
+end_date   <- as.Date("2024-11-01")
+cutoffs    <- as.Date(c("2022-11-01", "2024-11-01")) 
+
+# Refit ols for expanding window 
+fit_ols <- function(y, X) {
+  Xs <- scale(as.matrix(X))
+  co <- coef(lm(y ~ Xs))
+  tibble(
+    intercept = unname(co[1]),
+    !!!setNames(as.list(unname(co[-1])), predictors)
+  )
+}
+
+# Build window 
+expand_to <- function(df, cut) {
+  df_win <- df |>
+    filter(month_date >= start_date, month_date <= cut)
+  fit_ols(
+    y = df_win[[target]],
+    X = df_win[, predictors, drop = FALSE]
+  ) |>
+    mutate(till_date = cut)
+}
+
+# Results 
+coefs_cuts <- panel |>
+  filter(month_date >= start_date, month_date <= end_date) |>
+  group_by(region) |>
+  group_modify(~{
+    reg <- .x
+    purrr::map_dfr(cutoffs, ~ expand_to(reg, .x))
+  }) |>
+  ungroup()
+
+# Comparison - table and plot 
+coef_diff <- coefs_cuts |>
+  pivot_longer(
+    cols = c(intercept, market, mining, lifestyle),
+    names_to = "factor", values_to = "beta"
+  ) |>
+  pivot_wider(
+    names_from = till_date, 
+    values_from = beta
+  ) |> 
+  rename(as_of_2022 = `2022-11-01`, as_of_2024 = `2024-11-01`) |>
+  mutate(diff = as_of_2024 - as_of_2022) 
+
+coef_diff_tbl <- coef_diff |>
+  group_by(factor) |>
+  summarise(mean_change = mean(diff), sd_change = sd(diff)) 
+  
+kable(coef_diff_tbl, digits = 4)
+```
+
+@fig-coef-window compares the 2022 and 2024 coefficient estimates for each factor. The points align closely with the 45-degree line, indicating that factor effects remain largely unchanged across years. This stability suggests that incorporating the latest data has not materially affected the underlying relationships, reinforcing the robustness of the factor structure.
+
+```{r expending-window-plot}
+#| label: fig-coef-window 
+#| fig-cap: Scatterplot comparing expanding-window estimates for 2022 and 2024, showing that factor sensitivities have remained remarkably consistent despite new data.
+#| fig-pos: H
+
+ggplot(coef_diff, aes(x = as_of_2024, y = as_of_2022, colour = factor)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  geom_point(alpha = 0.8) +
+  facet_wrap(~factor, scales = "free") +
+  labs(
+    title = "Coefficient Stability: 2022 vs 2024",
+    subtitle = "Coefficients show strong year-to-year stability across regions",
+    x = "Coefficient (up to 2022-11)",
+    y = "Coefficient (up to 2024-11)"
+  ) +
+  theme_minimal()
+```
+
+# Conclusion 
+
+The analysis extends the factor modelling framework beyond static estimation to encompass dynamic forecasting and
+time-varying inference. The factor forecasts reveal a clear contrast in behaviour of the market and mining factors. The
+market factor projects a continuation of the national housing uptrend, with an 80% prediction width of approximately 0.04
+- 0.05, indicating that while uncertainty widens modestly with horizon, the aggregate trend remains firmly upward. In
+contrast, the mining factor displays tighter prediction intervals and a more symmetrical distribution around its mean,
+consistent with mean-reverting dynamics. This behaviour reflects the transitory nature of resource-driven shocks:
+expansions in mining regions tend to unwind rather than compound, producing bounded rather than explosive cycles. The
+forecasting results therefore delineate two distinct temporal modes: national persistence and regional reversion, under a
+shared macroeconomic backdrop.
+
+Dynamic estimation confirms that these relationships are structurally stable. ARIMAX residual control and expanding-window
+estimation both preserve the factor hierarchy observed in the static framework while refining its precision. Across the
+2022 to 2024 window, factor coefficients remain highly correlated ($\rho$ > 0.95), signifying negligible structural drift
+despite the inclusion of new data. The market factor retains a median coefficient near 1.0, implying that a 1 % rise in
+the national index corresponds to roughly a 1 % increase across most regions. Mining sensitivities remain centred around
+zero but exhibit a marked contraction in spread once autocorrelation is modelled, indicating a more conservative
+attribution of cyclical resource effects. Lifestyle coefficients, averaging around 0.2, also tighten slightly under
+ARIMAX, suggesting that these regional differentials are persistent but limited in amplitude.
+
+Taken together, these findings portray a housing system governed by a persistent national growth engine and
+self-correcting regional cycles. National shocks transmit broadly and uniformly, while local fluctuations linked to the
+mining sector revert toward long-term equilibrium rather than diverge. The stability of coefficients across time and
+specification demonstrates that the principal drivers of the regional housing prices are enduring and
+interpretable, not artefacts of sample period or model choice. Accounting for temporal dependence thus sharpens inference
+rather than alters it, yielding a transparent mapping between national and regional market dynamics.
+
+From a broader perspective, the extended model underscores the resilience of Australia’s housing structure: Long-run
+national growth coexists with spatial heterogeneity that is cyclical, not structural. Future research could extend this
+framework toward state-space or time-varying parameter factor models to examine how these relationships evolve under
+macroeconomic shocks such as interest-rate adjustments or migration surges. By bridging static factor models and dynamic
+forecasting, this analysis provides a foundation for understanding how systemic and regional forces interact to shape the
+geography of housing growth across Australia.
