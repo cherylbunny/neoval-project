@@ -93,7 +93,7 @@ The resulting factor model can be applied for a variety of purposes, but our cen
 
 ## Methodologies 
 
-### PCA 
+### Principal Component Analysis 
 
 Principal Component Analysis (PCA) was initially applied to the original housing price indexes at the Statistical Area Level Two (SA2) regional level, after which the results were aggregated to broader geographic scales as required. It is useful to briefly revisit PCA and how it allowed us to identify specific factors. The original analysis was conducted by Will Sijp, the supervisor of this project, with comprehensive details provided in the referenced works. The following section presents a brief summary of his methodology.
 
@@ -226,6 +226,16 @@ All datasets are organised and available in the data folder:
 * Mean-adjusted factor series derived from the PCA results, named `df_factor_trends`
 * Regression coefficients estimated from the factor proxies, named `df_reg_coefs_new`
 * Geographic data for SA4 regions, named `SA4_2021_AUST_SHP_GDA2020.shp`
+
+## Acknowledgements 
+
+This project was conducted under the supervision of Will Sijp from Neoval Pty Ltd, whose expertise in econometrics and housing market analysis was instrumental in shaping the research. Sijp developed the Principal Component Analysis (PCA) framework and factor construction methodology, introduced the underlying formulas, and reviewed the implementation of the factor series. He also provided guidance on the time-series modelling strategy, including the selection of the ARIMAX model and the expanding-window forecasting approach, and continuously advised on the direction and objectives of the research.
+
+The analysis and report preparation were carried out by Yiran Yao, including all R coding, exploratory analysis of the factor series, implementation, selection, and evaluation of time-series forecasting models, static factor and ARIMAX model estimation, and visualisation of results. The written report was authored solely by Yiran Yao.
+
+We also acknowledge Monash University for providing computational resources and academic support throughout the research process.
+
+Finally, parts of the report text were refined using OpenAI’s ChatGPT (GPT-5, 2025) to improve clarity and structure [openai2025chatgpt], and minor coding issues were resolved with its assistance.
 
 ## Project Limitation 
 
@@ -1368,35 +1378,18 @@ ggplot(coef_diff, aes(x = as_of_2024, y = as_of_2022, colour = factor)) +
 
 # Conclusion 
 
-The analysis extends the factor modelling framework beyond static estimation to encompass dynamic forecasting and
-time-varying inference. The factor forecasts reveal a clear contrast in behaviour of the market and mining factors. The
-market factor projects a continuation of the national housing uptrend, with an 80% prediction width of approximately 0.04
-- 0.05, indicating that while uncertainty widens modestly with horizon, the aggregate trend remains firmly upward. In
-contrast, the mining factor displays tighter prediction intervals and a more symmetrical distribution around its mean,
-consistent with mean-reverting dynamics. This behaviour reflects the transitory nature of resource-driven shocks:
-expansions in mining regions tend to unwind rather than compound, producing bounded rather than explosive cycles. The
-forecasting results therefore delineate two distinct temporal modes: national persistence and regional reversion, under a
-shared macroeconomic backdrop.
+The analysis extends the factor modelling framework beyond static estimation to encompass dynamic forecasting and time-varying inference. The factor forecasts reveal a clear contrast in behaviour of the market and mining factors. The market factor projects a continuation of the national housing uptrend, with an 80% prediction width of approximately 0.04 - 0.05, indicating that while uncertainty widens modestly with horizon, the aggregate trend remains firmly upward. In contrast, the mining factor displays tighter prediction intervals and a more symmetrical distribution around its mean, consistent with mean-reverting dynamics. This behaviour reflects the transitory nature of resource-driven shocks: Expansions in mining regions tend to unwind rather than compound, producing bounded rather than explosive cycles. The
+forecasting results therefore delineate two distinct temporal modes: national persistence and regional reversion, under a shared macroeconomic backdrop.
 
-Dynamic estimation confirms that these relationships are structurally stable. ARIMAX residual control and expanding-window
-estimation both preserve the factor hierarchy observed in the static framework while refining its precision. Across the
-2022 to 2024 window, factor coefficients remain highly correlated ($\rho$ > 0.95), signifying negligible structural drift
-despite the inclusion of new data. The market factor retains a median coefficient near 1.0, implying that a 1 % rise in
-the national index corresponds to roughly a 1 % increase across most regions. Mining sensitivities remain centred around
-zero but exhibit a marked contraction in spread once autocorrelation is modelled, indicating a more conservative
-attribution of cyclical resource effects. Lifestyle coefficients, averaging around 0.2, also tighten slightly under
-ARIMAX, suggesting that these regional differentials are persistent but limited in amplitude.
+Dynamic estimation confirms that these relationships are structurally stable. ARIMAX residual control and expanding-window estimation both preserve the factor hierarchy observed in the static framework while refining its precision. Across the 2022 to 2024 window, factor coefficients remain highly correlated ($\rho$ > 0.95), signifying negligible structural drift despite the inclusion of new data. The market factor retains a median coefficient near 1.0, implying that a 1 % rise in the national index corresponds to roughly a 1 % increase across most regions. Mining sensitivities remain centred around zero but exhibit a marked contraction in spread once autocorrelation is modelled, indicating a more conservative attribution of cyclical resource effects. Lifestyle coefficients, averaging around 0.2, also tighten slightly under ARIMAX, suggesting that these regional differentials are persistent but limited in amplitude.
 
 Taken together, these findings portray a housing system governed by a persistent national growth engine and
-self-correcting regional cycles. National shocks transmit broadly and uniformly, while local fluctuations linked to the
-mining sector revert toward long-term equilibrium rather than diverge. The stability of coefficients across time and
-specification demonstrates that the principal drivers of the regional housing prices are enduring and
-interpretable, not artefacts of sample period or model choice. Accounting for temporal dependence thus sharpens inference
-rather than alters it, yielding a transparent mapping between national and regional market dynamics.
+self-correcting regional cycles. National shocks transmit broadly and uniformly, while local fluctuations linked to the mining sector revert toward long-term equilibrium rather than diverge. The stability of coefficients across time and specification demonstrates that the principal drivers of the regional housing prices are enduring and interpretable, not artefacts of sample period or model choice. Accounting for temporal dependence thus sharpens inference rather than alters it, yielding a transparent mapping between national and regional market dynamics.
 
-From a broader perspective, the extended model underscores the resilience of Australia’s housing structure: Long-run
-national growth coexists with spatial heterogeneity that is cyclical, not structural. Future research could extend this
-framework toward state-space or time-varying parameter factor models to examine how these relationships evolve under
-macroeconomic shocks such as interest-rate adjustments or migration surges. By bridging static factor models and dynamic
-forecasting, this analysis provides a foundation for understanding how systemic and regional forces interact to shape the
-geography of housing growth across Australia.
+From a broader perspective, the extended model underscores the resilience of Australia’s housing structure: Long-run national growth coexists with spatial heterogeneity that is cyclical, not structural. Future research could extend this framework toward state-space or time-varying parameter factor models to examine how these relationships evolve under macroeconomic shocks such as interest-rate adjustments or migration surges. By bridging static factor models and dynamic forecasting, this analysis provides a foundation for understanding how systemic and regional forces interact to shape the geography of housing growth across Australia.
+
+Future work could explore more sophisticated time-varying parameter models to capture potential non-linearities and regime shifts in regional housing dynamics. Additionally, incorporating macroeconomic covariates like interest rates, employment trends, and migration patterns could enhance the explanatory power of the model. Finally, extending the analysis to include more granular spatial units or alternative asset classes may provide further insights into the interplay between national trends and local market conditions.
+
+# Code and Data files 
+All code and processed data supporting this report are available in the project’s GitHub repository:
+https://github.com/cherylbunny/neoval-project.
