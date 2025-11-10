@@ -152,10 +152,6 @@ def main():
     parser.add_argument("--agg_start", default="", help="Optional YYYY-MM start for aggregation window.")
     parser.add_argument("--agg_end",   default="", help="Optional YYYY-MM end for aggregation window.")
 
-    # Optional: drop highly collinear factors with Market per-window
-    parser.add_argument("--collinear_guard", type=float, default=0.0,
-                        help="If >0, drop non-market factors when |corr(factor, market)| ≥ threshold (e.g., 0.95).")
-
     # I(1) option — first-difference y and all factors before fitting
     parser.add_argument("--i1", action="store_true",
                         help="First-difference y and all selected factors (estimate on Δ series).")
@@ -256,21 +252,6 @@ def main():
             start = t_end - pd.DateOffset(months=roll_obs-1)
             y = y_full.loc[start:t_end]
             X = X_full.loc[start:t_end].copy()
-
-        # Optional per-window collinearity guard
-        if args.collinear_guard and "market" in X.columns and len(X.columns) > 1:
-            corr = X.corr()
-            to_drop = []
-            for col in X.columns:
-                if col == "market":
-                    continue
-                val = corr.loc["market", col] if ("market" in corr.index and col in corr.columns) else np.nan
-                if np.isfinite(val) and abs(val) >= args.collinear_guard:
-                    to_drop.append(col)
-            if to_drop:
-                if args.verbose:
-                    print(f"[guard] {t_end.date()}: dropping {to_drop} (|corr|≥{args.collinear_guard})")
-                X = X.drop(columns=to_drop, errors="ignore")
 
         try:
             res = fit_arimax(y, X, order=args.order, sorder=args.sorder)

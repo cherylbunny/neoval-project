@@ -5,10 +5,11 @@ Factor ARIMAX modelling for Mining (PS) and Lifestyle, with forecast funnels.
 
 Key features
 - Optional boom/decline dummies for Mining (off by default).
-- ARIMA(p,0,q) grid search with AICc; parsimony rule picks the simplest model
+- ARIMA(p,d,q) grid search with AICc; parsimony rule picks the simplest model
   among those within ΔAICc <= parsimony_delta (default 2.0).
 - h-step forecasts with state-space funnels; outputs CSV + paper-ready plots.
 - Summary CSV (and optional LaTeX) with orders, information criteria, and LB tests.
+- Optional AR/MA coefficient table printed to stdout unless --no_table is set.
 
 Usage (defaults assume your repo layout):
   ./build_factor_funnels.py \
@@ -125,91 +126,116 @@ def autodetect_boom_decline(y: pd.Series,
 
     return boom_start, boom_end, decline_end
 
+
 def fit_arimax_grid_parsimony(y: pd.Series,
                               exog: Optional[pd.DataFrame],
                               p_max: int = 3,
                               q_max: int = 2,
                               parsimony_delta: float = 2.0):
     """
-    Fit ARIMA(p,0,q) for p=0..p_max, q=0..q_max, trend='c' with optional exog.
-    Returns (chosen_order, chosen_result, metrics_dict, best_order, best_aicc).
+    Fit ARIMA(p,d,q) with d in {0,1} over p=0..p_max, q=0..q_max, trend='c', optional exog.
+    Returns exactly (chosen_order, chosen_result, metrics_dict).
 
-    Parsimony: among candidates with AICc <= best_aicc + parsimony_delta,
-    pick the simplest (min p+q, then min q, then min p). Metrics for the
-    chosen model include AIC/AICc/BIC and Ljung–Box p-values.
+    Selection:
+      1) Fit full grid for d=0 and d=1.
+      2) Prefer d=0 unless the best d=1 beats the best d=0 by >= AICC_ADV_D1 (AICc units).
+      3) Within the chosen d, among models with AICc <= best_aicc_d + parsimony_delta,
+         pick the simplest (min p+q, then min q, then min p), then lowest AICc.
     """
+    AICC_ADV_D1 = 10.0  # d=1 must win by at least this much
+
     y_fit = y.dropna()
-    n = y_fit.shape[0]
-    candidates = []
+    n = int(y_fit.shape[0])
 
-    for p in range(p_max + 1):
-        for q in range(q_max + 1):
-            try:
-                mod = SARIMAX(endog=y, exog=exog, order=(p,0,q),
-                              seasonal_order=(0,0,0,0), trend='c',
-                              enforce_stationarity=True, enforce_invertibility=True)
-                res = mod.fit(disp=False, maxiter=500)
-                k = int(res.params.shape[0])
-                llf = float(res.llf)
-                aicc_val = aicc(llf, k, n)
-                candidates.append({
-                    "order": (p,0,q),
-                    "aic": float(res.aic),
-                    "aicc": float(aicc_val),
-                    "bic": float(res.bic),
-                    "k": k,
-                    "res": res
-                })
-            except Exception:
-                continue
+    candidates = {0: [], 1: []}  # per-d
 
-    if not candidates:
+    for d in (0, 1):
+        for p in range(p_max + 1):
+            for q in range(q_max + 1):
+                try:
+                    mod = SARIMAX(endog=y, exog=exog, order=(p, d, q),
+                                  seasonal_order=(0, 0, 0, 0), trend='c',
+                                  enforce_stationarity=True, enforce_invertibility=True)
+                    res = mod.fit(disp=False, maxiter=500)
+                    k = int(res.params.shape[0])
+                    llf = float(res.llf)
+                    aicc_val = aicc(llf, k, n)
+                    candidates[d].append({
+                        "order": (p, d, q),
+                        "aic": float(res.aic),
+                        "aicc": float(aicc_val),
+                        "bic": float(res.bic),
+                        "k": k,
+                        "res": res
+                    })
+                except Exception:
+                    continue
+
+    if not candidates[0] and not candidates[1]:
         raise RuntimeError("No ARIMAX candidate converged. Consider relaxing the grid.")
 
-    # Best by AICc
-    best = min(candidates, key=lambda c: c["aicc"])
-    best_aicc = best["aicc"]
-    best_order = best["order"]
+    best_d0 = min(candidates[0], key=lambda c: c["aicc"]) if candidates[0] else None
+    best_d1 = min(candidates[1], key=lambda c: c["aicc"]) if candidates[1] else None
 
-    # Parsimony shortlist
-    shortlist = [c for c in candidates if c["aicc"] <= best_aicc + parsimony_delta]
-    # Sort by complexity then tie-breakers
+    if best_d0 is None and best_d1 is None:
+        raise RuntimeError("No ARIMAX candidate converged for d=0 or d=1.")
+    elif best_d0 is None:
+        chosen_d = 1; ref_best = best_d1
+    elif best_d1 is None:
+        chosen_d = 0; ref_best = best_d0
+    else:
+        chosen_d = 1 if (best_d1["aicc"] <= best_d0["aicc"] - AICC_ADV_D1) else 0
+        ref_best = best_d1 if chosen_d == 1 else best_d0
+
+    shortlist = [c for c in candidates[chosen_d] if c["aicc"] <= ref_best["aicc"] + parsimony_delta]
+    if not shortlist:
+        shortlist = [ref_best]
+
     shortlist.sort(key=lambda c: ((c["order"][0] + c["order"][2]),  # p+q
                                   c["order"][2],                    # q
                                   c["order"][0],                    # p
-                                  c["aicc"]))                       # finally AICc
+                                  c["aicc"]))                       # then AICc
 
     chosen = shortlist[0]
     res = chosen["res"]
 
-    # Residual diagnostics for chosen model
     resid = res.resid
     resid = resid[np.isfinite(resid)]
     L_p = lb_pvals(resid, lags=[12, 24])
 
-    # Dummy stats if present
     dummy_stats = {}
     if exog is not None:
         for col in exog.columns:
             if col.lower() in ("boom", "decline"):
                 if col in res.params.index:
-                    val = float(res.params[col])
-                    se  = float(res.bse[col])
-                    t   = val / se if se > 0 else np.nan
-                    p   = 2.0 * (1 - stats.t.cdf(abs(t), df=max(1, n - chosen["k"])))
+                    val = float(res.params[col]); se = float(res.bse[col])
+                    t = val / se if se > 0 else np.nan
+                    p = 2.0 * (1 - stats.t.cdf(abs(t), df=max(1, n - chosen["k"])))
                     dummy_stats[col] = {"coef": val, "se": se, "t": t, "p": p}
                 else:
                     dummy_stats[col] = {"coef": np.nan, "se": np.nan, "t": np.nan, "p": np.nan}
+
+    all_cands = (candidates[0] if candidates[0] else []) + (candidates[1] if candidates[1] else [])
+    best_overall = min(all_cands, key=lambda c: c["aicc"])
+    best_order_overall = best_overall["order"]; best_aicc_overall = best_overall["aicc"]
 
     metrics = {
         "order": chosen["order"],
         "aic": chosen["aic"], "aicc": chosen["aicc"], "bic": chosen["bic"],
         "lb_p12": L_p.get(12, np.nan), "lb_p24": L_p.get(24, np.nan),
         "dummy_stats": dummy_stats,
-        "selected_by_parsimony": (chosen["order"] != best_order),
-        "best_order": best_order, "best_aicc": best_aicc
+        "selected_by_parsimony": (chosen["order"] != ref_best["order"]),
+        "chosen_d": chosen_d,
+        "best_order_within_d": ref_best["order"],
+        "best_aicc_within_d": ref_best["aicc"],
+        "best_order_overall": best_order_overall,
+        "best_aicc_overall": best_aicc_overall,
+        "best_aicc_d0": (best_d0["aicc"] if best_d0 else np.nan),
+        "best_aicc_d1": (best_d1["aicc"] if best_d1 else np.nan)
     }
     return chosen["order"], res, metrics
+
+
 
 def forecast_with_funnel(res, h: int, exog_future: Optional[pd.DataFrame]) -> pd.DataFrame:
     """h-step forecast producing: date, step, pred_mean, lower_95, upper_95, se_mean, var"""
@@ -243,7 +269,6 @@ def make_forecast_plot(y: pd.Series, fc_df: pd.DataFrame, title: str, outpath_ba
     ax.set_ylabel("Level (log)")
     ax.legend(loc="upper left", frameon=False)
 
-    # --- ensure zero line is visible
     ymin, ymax = ax.get_ylim()
     ax.set_ylim(min(ymin, 0.0), max(ymax, 0.0))
     ax.axhline(0.0, lw=0.8, ls="--", alpha=0.5)
@@ -259,7 +284,6 @@ def make_combined_funnel_plot(y1: pd.Series, fc1: pd.DataFrame, title1: str,
                               panel_labels=("a)", "b)")):
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharey=True)
 
-    # Left panel
     ax = axes[0]
     ax.plot(y1.index, y1.values, lw=1.75, label="Observed")
     ax.plot(fc1["date"], fc1["pred_mean"], lw=1.75, label="Forecast")
@@ -269,7 +293,6 @@ def make_combined_funnel_plot(y1: pd.Series, fc1: pd.DataFrame, title1: str,
     ax.set_ylabel("Level (log)")
     ax.legend(loc="upper left", frameon=False)
 
-    # Right panel
     ax = axes[1]
     ax.plot(y2.index, y2.values, lw=1.75, label="Observed")
     ax.plot(fc2["date"], fc2["pred_mean"], lw=1.75, label="Forecast")
@@ -278,7 +301,6 @@ def make_combined_funnel_plot(y1: pd.Series, fc1: pd.DataFrame, title1: str,
     ax.set_xlabel("Month")
     ax.legend(loc="upper left", frameon=False)
 
-    # Harmonize y-limits; force zero into view; add zero line to both
     min1 = min(np.nanmin(y1.values), np.nanmin(fc1["lower_95"].values))
     max1 = max(np.nanmax(y1.values), np.nanmax(fc1["upper_95"].values))
     min2 = min(np.nanmin(y2.values), np.nanmin(fc2["lower_95"].values))
@@ -330,6 +352,8 @@ def main():
     ap.add_argument("--tex-fit-summary", default="",
                     help="Optional LaTeX output for the same table")
 
+    ap.add_argument("--no_table", action="store_true",
+        help="Turn off ARIMA parameter table output (printed to stdout)")
 
     args = ap.parse_args()
     os.makedirs(args.outdir, exist_ok=True)
@@ -344,12 +368,12 @@ def main():
     summary_rows = []
     horizon_vars = {}
     detected_dates = {}
+    fit_results = {}  # factor -> dict(order=(p,d,q), res=results)
 
     y_mining = None
     fc_mining = None
     y_lifestyle = None
     fc_lifestyle = None
-
 
     # ---------------- Mining ----------------
     if "mining" in [x.lower() for x in args.factors]:
@@ -392,9 +416,9 @@ def main():
                     detected_dates["mining_boom"] = (None, None, None)
                     print("[MINING] auto-detect found no clear boom; using NO dummies.")
 
-        # Fit with parsimony
         order, res, m = fit_arimax_grid_parsimony(y, X, p_max=args.pmax, q_max=args.qmax,
                                                   parsimony_delta=args.parsimony_delta)
+        fit_results["Mining"] = {"order": order, "res": res}
 
         # Forecast (zeros for dummies OOS; else no exog)
         if X is None:
@@ -411,7 +435,6 @@ def main():
 
         y_mining = y
         fc_mining = fc
-
 
         plot_base = os.path.join(args.outdir, f"factor_funnel_mining")
         make_forecast_plot(y, fc, "Mining factor: forecast and 95% interval", plot_base)
@@ -439,7 +462,7 @@ def main():
             "boom_p": dboom.get("p", np.nan) if X is not None else np.nan,
             "decline": ddecl.get("coef", np.nan) if X is not None else np.nan,
             "decline_se": ddecl.get("se", np.nan) if X is not None else np.nan,
-            "decline_p": ddecl.get("p", np.nan) if X is not None else np.nan,
+            "decline_p": ddecl.get('p', np.nan) if X is not None else np.nan,
             "LB_p12": m["lb_p12"], "LB_p24": m["lb_p24"],
             "boom_start": ds[0], "boom_end": ds[1], "decline_end": ds[2]
         })
@@ -451,6 +474,7 @@ def main():
         X = None
         order, res, m = fit_arimax_grid_parsimony(y, X, p_max=args.pmax, q_max=args.qmax,
                                                   parsimony_delta=args.parsimony_delta)
+        fit_results["Lifestyle"] = {"order": order, "res": res}
 
         fc = forecast_with_funnel(res, args.h, exog_future=None)
         fc_path = os.path.join(args.outdir, f"factor_forecast_lifestyle_h{args.h}.csv")
@@ -458,7 +482,6 @@ def main():
 
         y_lifestyle = y
         fc_lifestyle = fc
-
 
         plot_base = os.path.join(args.outdir, f"factor_funnel_lifestyle")
         make_forecast_plot(y, fc, "Lifestyle factor: forecast and 95% interval", plot_base)
@@ -487,7 +510,6 @@ def main():
                                   y_lifestyle, fc_lifestyle, "Lifestyle",
                                   combined_base)
 
-
     # ---------------- summary outputs ----------------
     if summary_rows:
         summ = pd.DataFrame(summary_rows)
@@ -514,29 +536,21 @@ def main():
         print(f"[ok] Wrote horizon-variance summary: {hsum_path}")
 
     # ---- Optional: print/write a factor-level fit + 10y uncertainty table ----
-    if summary_rows and horizon_vars:
+    if summary_rows and horizon_vars and args.print_fit_summary:
         summ = pd.DataFrame(summary_rows)
-
-        # Map factor -> 10y forecast variance
         var_map = {
             "Mining": horizon_vars.get("sigma2_PS", np.nan),
             "Lifestyle": horizon_vars.get("sigma2_L", np.nan),
         }
-        # Build rows
         rows = []
         for _, r in summ.iterrows():
             fac = str(r["Factor"])
             s2 = float(var_map.get(fac, np.nan))
             sd = float(np.sqrt(s2)) if np.isfinite(s2) else np.nan
             x95 = float(np.exp(1.96 * sd)) if np.isfinite(sd) else np.nan
-
-            # Optional p-values for dummies (Mining only, and only if present)
-            boom_p = r.get("boom_p", np.nan)
-            decl_p = r.get("decline_p", np.nan)
-
             rows.append({
                 "Factor": fac,
-                "ARIMA(p,0,q)": r["Order"],            # already like "(p,0,q)"
+                "ARIMA(p,0,q)": r["Order"],
                 "AICc": float(r["AICc"]),
                 "LB12": float(r["LB_p12"]),
                 "LB24": float(r["LB_p24"]),
@@ -544,13 +558,9 @@ def main():
                 "sigma2_10y": s2,
                 "sigma_10y": sd,
                 "x95_factor": x95,
-                "boom_p": boom_p,
-                "decline_p": decl_p,
             })
 
         fit_tab = pd.DataFrame(rows)
-
-        # Clean/round for viewing
         view = fit_tab.copy()
         view["AICc"] = view["AICc"].round(2)
         view["LB12"] = view["LB12"].round(3)
@@ -558,40 +568,116 @@ def main():
         view["sigma2_10y"] = view["sigma2_10y"].round(6)
         view["sigma_10y"] = view["sigma_10y"].round(4)
         view["x95_factor"] = view["x95_factor"].round(3)
-        # Hide dummy p columns if all-NaN
         show_cols = ["Factor","ARIMA(p,0,q)","AICc","LB12","LB24","sigma_10y","x95_factor"]
-        if view["boom_p"].notna().any() or view["decline_p"].notna().any():
-            view["boom_p"] = view["boom_p"].round(3)
-            view["decline_p"] = view["decline_p"].round(3)
-            show_cols += ["boom_p","decline_p"]
 
-        if args.print_fit_summary and not view.empty:
-            print("\n[Factor-level fit and 10y uncertainty (NOT region-scaled)]")
-            print(view[show_cols].to_string(index=False))
-            print("Note: region bands use exp(1.96*sqrt(lambda_r^2*sigma2_PS + gamma_r^2*sigma2_L + sigma2_epsilon)).\n")
+        print("\n[Factor-level fit and 10y uncertainty (NOT region-scaled)]")
+        print(view[show_cols].to_string(index=False))
+        print("Note: region bands use exp(1.96*sqrt(lambda_r^2*sigma2_PS + gamma_r^2*sigma2_L + sigma2_epsilon)).\n")
 
+    # ---------------- AR/MA coefficient LaTeX (stdout) ----------------
+    if (not args.no_table) and fit_results:
+        # First pass: collect rows and find max AR/MA length
+        rows = []
+        max_p = 0
+        max_q = 0
+        for fac, fx in fit_results.items():
+            p, d, q = fx["order"]
+            res = fx["res"]
 
-            tex_df = view[show_cols].rename(columns={
-                "ARIMA(p,0,q)": "ARIMA$(p,0,q)$",
-                "h_months": "$h$ (months)",
-                "sigma2_10y": "$\\sigma^2$ (10y)",
-                "sigma_10y": "$\\sigma$ (10y)",
-                "x95_factor": "$x95$ (factor)",
-                "boom_p": "boom $p$",
-                "decline_p": "decline $p$"
+            # AR/MA params
+            ar = np.asarray(getattr(res, "arparams", np.array([])), dtype=float)
+            ma = np.asarray(getattr(res, "maparams", np.array([])), dtype=float)
+            max_p = max(max_p, len(ar))
+            max_q = max(max_q, len(ma))
+
+            # intercept
+            intercept = np.nan
+            if hasattr(res, "params"):
+                try:
+                    # prefer 'const', fall back to 'intercept'
+                    if "const" in res.params.index:
+                        intercept = float(res.params["const"])
+                    elif "intercept" in res.params.index:
+                        intercept = float(res.params["intercept"])
+                except Exception:
+                    intercept = np.nan
+
+            # sigma^2: prefer explicit param; else scale (if informative); else residual variance
+            sigma2_candidates = []
+            try:
+                if hasattr(res, "params") and "sigma2" in res.params.index:
+                    sigma2_candidates.append(float(res.params["sigma2"]))
+            except Exception:
+                pass
+            try:
+                if hasattr(res, "scale") and np.isfinite(res.scale):
+                    sigma2_candidates.append(float(res.scale))
+            except Exception:
+                pass
+            try:
+                resid = res.resid
+                resid = resid[np.isfinite(resid)]
+                if resid.size > 5:
+                    sigma2_candidates.append(float(np.var(resid, ddof=1)))
+            except Exception:
+                pass
+
+            sigma2 = np.nan
+            for s2 in sigma2_candidates:
+                if np.isfinite(s2) and s2 > 0:
+                    sigma2 = s2
+                    break
+
+            sigma = float(np.sqrt(sigma2)) if np.isfinite(sigma2) else np.nan
+
+            rows.append({
+                "Factor": fac,
+                "Order": f"({p},{d},{q})",
+                "Intercept": intercept,
+                "sigma2": sigma2,
+                "sigma": sigma,
+                "ar_list": ar,
+                "ma_list": ma,
             })
-            tex_df = tex_df.set_index("Factor")
 
-            tex = tex_df.T.to_latex(index=True, escape=False,
-                                column_format="lrrrrrlll"[:len(show_cols)+1], float_format="%.2f")
-            #out_path = os.path.join(args.outdir, "factor_fit_and_funnel_summary.tex") \
-            #        if args.tex_fit_summary == "" else args.tex_fit_summary
+        # Build table rows with phi/theta and sigma columns
+        out_rows = []
+        for r in rows:
+            row = {
+                "Factor": r["Factor"],
+                "ARIMA$(p,d,q)$": r["Order"],
+                "Intercept": r["Intercept"],
+            }
+            for i in range(max_p):
+                row[f"$\\phi_{i+1}$"] = float(r["ar_list"][i]) if i < len(r["ar_list"]) else np.nan
+            for j in range(max_q):
+                row[f"$\\theta_{j+1}$"] = float(r["ma_list"][j]) if j < len(r["ma_list"]) else np.nan
+            row["$\\sigma$ (innov)"] = r["sigma"]
+            row["$\\sigma^2$"] = r["sigma2"]
+            out_rows.append(row)
 
-            print(f"\n{tex}\n")
-            #with open(out_path, "w") as f:
-            #    f.write(tex)
-            #print(f"[ok] Wrote factor-level fit + 10y uncertainty LaTeX: {out_path}")
+        params_df = pd.DataFrame(out_rows)
 
+        # Round general numerics to 3 decimals
+        phi_cols = [c for c in params_df.columns if c.startswith("$\\phi_")]
+        theta_cols = [c for c in params_df.columns if c.startswith("$\\theta_")]
+        round_cols = ["Intercept", "$\\sigma$ (innov)"] + phi_cols + theta_cols
+        for c in round_cols:
+            if c in params_df.columns:
+                params_df[c] = params_df[c].astype(float).round(3)
+
+        # sigma^2 in scientific notation
+        if "$\\sigma^2$" in params_df.columns:
+            params_df["$\\sigma^2$"] = params_df["$\\sigma^2$"].apply(
+                lambda x: "" if (not np.isfinite(x)) else f"{x:.3e}"
+            )
+
+        print(params_df)
+
+        tex = params_df.to_latex(index=False, escape=False,
+                                 column_format="l" + "r"*(len(params_df.columns)-1), float_format="%.4f")
+
+        print(f"\n[ARIMA coefficient table]\n{tex}\n")
 
     print("[done]")
     return 0

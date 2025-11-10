@@ -276,7 +276,7 @@ def make_segmented_plot(df: pd.DataFrame, s2_PS: float, s2_L: float, tick_step: 
     L = mu - df_plot['w_tot']; R = mu + df_plot['w_tot']
     xmin = float(np.exp(L.min())); xmax = float(np.exp(R.max()))
 
-    C_MINING, C_LIFE, C_EPS, C_EDGE = '#8c564b', '#2ca02c', '#7f7f7f', '#000000'
+    C_MINING, C_LIFE, C_EPS, C_EDGE = "#dc8d07", "#58cd58", '#7f7f7f', '#000000'
 
     fig = plt.figure(figsize=(9, 4.5), dpi=300); ax = plt.gca()
     y = np.arange(len(df_plot))
