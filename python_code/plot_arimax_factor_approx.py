@@ -17,6 +17,14 @@ Optional remainder panel (--resid_panel):
 
 import os
 import argparse
+
+# Ensure Matplotlib config/cache go to a writable, local directory when MPLCONFIGDIR
+# is not preset in the environment.
+if "MPLCONFIGDIR" not in os.environ:
+    _mpl_dir = os.path.join(os.path.dirname(__file__), ".mplconfig")
+    os.environ["MPLCONFIGDIR"] = _mpl_dir
+    os.makedirs(_mpl_dir, exist_ok=True)
+
 import numpy as np
 import pandas as pd
 import warnings
