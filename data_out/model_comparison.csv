@@ -1,0 +1,8 @@
+metric,current_model,simplified_model,simplified_seasonal,order_201_seasonal,order_301_seasonal,order_202_seasonal,order_302_seasonal
+features,"rate_level+lags+changes","rate_level only","rate_level only","rate_level only","rate_level only","rate_level only","rate_level only"
+seasonal,"none","none","MA(1) lag 12","MA(1) lag 12","MA(1) lag 12","MA(1) lag 12","MA(1) lag 12"
+arma_order,"(1,0,0)","(1,0,0)","(1,0,0)","(2,0,1)","(3,0,1)","(2,0,2)","(3,0,2)"
+aicc,-3164.92,-3169.47,-3188.65,-3184.15,-3182.44,-3181.19,-3180.80
+bic,-3130.56,-3154.08,-3169.44,-3157.34,-3151.86,-3150.60,-3146.45
+lb_p12,0.000,0.000,0.000,0.000,0.000,0.001,0.002
+lb_p24,0.000,0.000,0.000,0.000,0.000,0.000,0.000
