@@ -263,6 +263,134 @@ def build_rate_features(rate: pd.Series,
     return X
 
 
+# ---------------------- macro (multi-series) exogenous features ----------------------
+
+# Default baseline regressor set agreed for the national funnel: full-history series
+# with defensible signal on monthly returns. Each spec is "series:transform[:lag]".
+#   transform in {level, d1, d3, d6, d12, yoy}
+#     level : the series as-is (percentage points, index level, etc.)
+#     d1/d3/d6/d12 : k-month difference of the level
+#     yoy   : 12-month log growth, i.e. log(s) - log(s).shift(12); for strictly
+#             positive flow/stock series (approvals, commencements, income, NOM, CPI)
+# Lags are applied after the transform, in months (default 0).
+DEFAULT_MACRO_FEATURES = [
+    "mortgage_rate:level",
+    "mortgage_rate:d3",
+    "building_approvals:yoy",
+    "housing_credit_growth:level",
+    "unemployment_rate:level",
+]
+
+
+def parse_macro_spec(spec: str) -> Tuple[str, str, int]:
+    """Parse 'series:transform[:lag]' into (series, transform, lag)."""
+    parts = [p.strip() for p in spec.split(":")]
+    if len(parts) == 2:
+        series, transform = parts
+        lag = 0
+    elif len(parts) == 3:
+        series, transform, lag_s = parts
+        lag = int(lag_s)
+    else:
+        raise argparse.ArgumentTypeError(
+            f"Macro spec '{spec}' must be 'series:transform' or 'series:transform:lag'."
+        )
+    transform = transform.lower()
+    if transform not in {"level", "d1", "d3", "d6", "d12", "yoy"}:
+        raise argparse.ArgumentTypeError(
+            f"Unsupported transform '{transform}' in '{spec}'. "
+            f"Use level, d1, d3, d6, d12, or yoy."
+        )
+    if lag < 0:
+        raise argparse.ArgumentTypeError("Macro feature lag must be non-negative.")
+    return series, transform, lag
+
+
+def transform_macro_series(s: pd.Series, transform: str) -> pd.Series:
+    """Apply a single transform to one macro series already on a monthly index."""
+    s = s.astype(float).sort_index().asfreq("MS")
+    if transform == "level":
+        out = s
+    elif transform == "yoy":
+        # 12-month log growth; guard against non-positive values (e.g. net
+        # overseas migration went negative during the 2020-21 border closure).
+        out = np.log(s.where(s > 0)).diff(12)
+    else:
+        k = {"d1": 1, "d3": 3, "d6": 6, "d12": 12}[transform]
+        out = s.diff(k)
+    # Never let +/-inf leak into the design matrix; treat as missing so the
+    # downstream dropna / missing-value checks handle it explicitly.
+    return out.replace([np.inf, -np.inf], np.nan)
+
+
+def load_macro_frame(macro_csv: str, date_col: str) -> pd.DataFrame:
+    """Load the wide macro CSV onto a clean monthly index, numeric columns only."""
+    df = pd.read_csv(expand(macro_csv))
+    if date_col not in df.columns:
+        alternatives = ["time", "month_date", "date", "Date", "month", "Month"]
+        found = next((c for c in alternatives if c in df.columns), None)
+        if found is None:
+            raise ValueError(
+                f"Date column '{date_col}' not found in {macro_csv}. "
+                f"Available columns: {list(df.columns)}"
+            )
+        date_col = found
+    df[date_col] = to_month_start(df[date_col])
+    df = df.set_index(date_col).sort_index()
+    df = df.apply(safe_numeric)
+    df = df.groupby(df.index).mean(numeric_only=True).asfreq("MS")
+    return df
+
+
+def build_macro_features(macro: pd.DataFrame,
+                         specs: Sequence[Tuple[str, str, int]]) -> pd.DataFrame:
+    """
+    Build the macro exogenous matrix from parsed specs.
+
+    Column naming mirrors the rate features: '<series>_<transform>' with an
+    optional '_lag<k>' suffix, so the training and forecast matrices align.
+    """
+    X = pd.DataFrame(index=macro.index)
+    for series, transform, lag in specs:
+        if series not in macro.columns:
+            raise ValueError(
+                f"Macro series '{series}' not found. Available: {list(macro.columns)}"
+            )
+        base = transform_macro_series(macro[series], transform)
+        name = f"{series}_{transform}"
+        if lag:
+            name = f"{name}_lag{lag}"
+        X[name] = base.shift(lag)
+    return X
+
+
+def extend_macro_future(macro: pd.DataFrame,
+                        specs: Sequence[Tuple[str, str, int]],
+                        cutoff: pd.Timestamp,
+                        future_index: pd.DatetimeIndex) -> pd.DataFrame:
+    """
+    Build the macro feature matrix over the forecast horizon.
+
+    Future regressor levels are held flat at each series' last observed value as
+    of the forecast origin. Under that assumption, difference transforms taper to
+    zero and yoy growth decays as the flat level laps the final 12 observed months
+    -- the honest 'no further news' baseline for a conditional rate-scenario
+    forecast. Long-horizon non-rate regressors therefore contribute their last
+    known momentum and then fade, rather than being silently extrapolated.
+    """
+    needed = max(48, len(future_index) + 13)  # enough history for d12 / yoy laps
+    hist = macro.loc[macro.index <= cutoff].tail(needed).copy()
+    last_vals = hist.ffill().iloc[-1]
+    future_levels = pd.DataFrame(
+        np.repeat(last_vals.values[None, :], len(future_index), axis=0),
+        index=future_index, columns=hist.columns,
+    )
+    ext = pd.concat([hist, future_levels]).sort_index()
+    ext = ext[~ext.index.duplicated(keep="last")].asfreq("MS")
+    Xext = build_macro_features(ext, specs)
+    return Xext.loc[future_index].copy()
+
+
 def center_or_standardize(X_train: pd.DataFrame,
                           X_future: pd.DataFrame,
                           standardize: bool) -> Tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
@@ -378,7 +506,10 @@ def forecast_scenario(res,
                       features: Sequence[str],
                       lags: Sequence[int],
                       train_mu: pd.Series,
-                      train_sd: pd.Series) -> pd.DataFrame:
+                      train_sd: pd.Series,
+                      macro: Optional[pd.DataFrame] = None,
+                      macro_specs: Optional[Sequence[Tuple[str, str, int]]] = None,
+                      exog_columns: Optional[Sequence[str]] = None) -> pd.DataFrame:
     # Include enough history to build lagged exogenous features for the forecast months.
     cutoff = y_train.index[-1]
     rate_upto_cutoff = rate_hist.loc[rate_hist.index <= cutoff]
@@ -387,6 +518,20 @@ def forecast_scenario(res,
 
     X_ext = build_rate_features(rate_ext, features=features, lags=lags)
     X_future = X_ext.loc[future_rate.index].copy()
+
+    # Append macro regressors over the same horizon (levels held flat at the
+    # forecast origin; see extend_macro_future for the rationale).
+    if macro is not None and macro_specs:
+        X_macro_future = extend_macro_future(
+            macro=macro, specs=macro_specs, cutoff=cutoff,
+            future_index=future_rate.index,
+        )
+        X_future = pd.concat([X_future, X_macro_future], axis=1)
+
+    # Reorder to exactly match the training design matrix.
+    if exog_columns is not None:
+        X_future = X_future.reindex(columns=list(exog_columns))
+
     if X_future.isna().any().any():
         bad = X_future.columns[X_future.isna().any()].tolist()
         raise ValueError(f"Future exogenous matrix has missing values in columns: {bad}")
@@ -565,6 +710,19 @@ def main() -> int:
                     help="Date column in the interest-rate CSV; default: time.")
     ap.add_argument("--rate_col", default="",
                     help="Interest-rate column to use. If omitted, the script tries to infer it.")
+
+    # ---- macro (multi-series) exogenous regressors ----
+    ap.add_argument("--macro_csv", default=os.path.join(DATA_PATH, "macro_data.csv"),
+                    help="Wide CSV of macro/housing series; default: data/macro_data.csv.")
+    ap.add_argument("--macro_date_col", default="time",
+                    help="Date column in the macro CSV; default: time.")
+    ap.add_argument("--macro_features", nargs="*", default=None,
+                    help="Macro regressor specs 'series:transform[:lag]'. "
+                         "Transforms: level, d1, d3, d6, d12, yoy. "
+                         "If omitted, the agreed baseline set is used. "
+                         "Pass --no_macro to disable macro regressors entirely.")
+    ap.add_argument("--no_macro", action="store_true",
+                    help="Disable macro regressors; reproduces the rate-only model.")
     ap.add_argument("--outdir", default=DATA_OUT,
                     help="Output directory; default: ~/Documents/github/neoval-project/data_out.")
 
@@ -619,6 +777,18 @@ def main() -> int:
     rate, chosen_rate_col = load_rate_series(args.rate_csv, args.rate_date_col, args.rate_col)
 
     X_raw = build_rate_features(rate, features=args.features, lags=args.rate_lags)
+
+    # Resolve and build macro regressors (default baseline unless disabled).
+    macro_specs: List[Tuple[str, str, int]] = []
+    macro_frame: Optional[pd.DataFrame] = None
+    if not args.no_macro:
+        spec_strings = args.macro_features if args.macro_features is not None else DEFAULT_MACRO_FEATURES
+        macro_specs = [parse_macro_spec(s) for s in spec_strings]
+        if macro_specs:
+            macro_frame = load_macro_frame(args.macro_csv, args.macro_date_col)
+            X_macro = build_macro_features(macro_frame, macro_specs)
+            X_raw = pd.concat([X_raw, X_macro], axis=1)
+
     data = pd.concat([y_model.rename("y"), X_raw], axis=1).dropna()
     if args.start:
         data = data.loc[data.index >= pd.to_datetime(args.start)]
@@ -631,6 +801,32 @@ def main() -> int:
     y_train = data["y"].asfreq("MS")
     y_log_train = y_log.loc[y_log.index <= y_train.index[-1]].asfreq("MS").dropna()
     X_train_raw = data.drop(columns=["y"]).asfreq("MS")
+    exog_columns = list(X_train_raw.columns)  # canonical order for the future matrix
+
+    # SARIMAX requires a contiguous monthly index, so the .asfreq above can
+    # reintroduce rows that dropna() had removed -- this happens when a chosen
+    # regressor has *interior* missing months over the estimation window (e.g.
+    # net_overseas_migration went negative during the 2020-21 border closure, so
+    # its yoy log-growth is undefined there). Such a regressor cannot enter the
+    # model as-is; fail loudly and name the culprit rather than passing NaNs to
+    # the fit. The padded rows make every column look NaN, so identify the real
+    # offender(s) from the pre-pad (dropna'd) rows that are now missing.
+    if X_train_raw.isna().any().any():
+        padded = X_train_raw.index.difference(data.index)  # rows reinserted by asfreq
+        # Find which regressor is actually undefined on the padded months by
+        # rebuilding each feature on the full grid and testing it there.
+        full_feats = X_raw  # built above on the contiguous monthly grid, pre-dropna
+        culprits = [c for c in exog_columns
+                    if c in full_feats.columns and full_feats.loc[padded, c].isna().any()]
+        n_bad = len(padded)
+        raise ValueError(
+            "Regressor(s) have missing values inside the estimation window and "
+            f"cannot be used as specified: {culprits or exog_columns} "
+            f"({n_bad} interior month(s) affected -- e.g. negative net overseas "
+            "migration breaks a yoy log transform). Drop the regressor, choose a "
+            "different transform (e.g. d12 instead of yoy), or restrict "
+            "--start/--end to a gap-free span."
+        )
 
     # Mean-center or z-score exog using only the estimation sample.
     # The future exog will be transformed with the same mean/std.
@@ -662,6 +858,10 @@ def main() -> int:
     print(f"market column: {args.market_col}")
     print(f"target:        {args.target}")
     print(f"rate column:   {chosen_rate_col}")
+    if macro_specs:
+        print(f"macro regs:    {[f'{s}:{t}' + (f':{l}' if l else '') for s, t, l in macro_specs]}")
+    else:
+        print("macro regs:    (none)")
     print(f"sample:        {y_train.index[0].date()} to {y_train.index[-1].date()}  (n={len(y_train)})")
     print(f"features:      {list(X_train.columns)}")
     print(f"order:         {order}")
@@ -740,6 +940,9 @@ def main() -> int:
             lags=args.rate_lags,
             train_mu=train_mu,
             train_sd=train_sd,
+            macro=macro_frame,
+            macro_specs=macro_specs,
+            exog_columns=exog_columns,
         )
         fc.insert(0, "scenario", sc)
         forecast_dfs[sc] = fc

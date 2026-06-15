@@ -75,3 +75,8 @@ _extensions/quarto-monash/.quarto-extension
 .DS_Store
 .Rproj.user/
 .Rhistory
+
+# Python virtual environment and caches
+.venv/
+__pycache__/
+*.pyc
