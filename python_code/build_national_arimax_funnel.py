@@ -33,6 +33,15 @@ Typical usage
       --features level d1 d3 d6 d12 \
       --rate_lags 0 3 6 12
 
+  # Monthly-return model with semi-annual seasonality
+  ./build_national_arimax_funnel.py \
+      --target monthly_return \
+      --h 60 \
+      --features level d1 \
+      --rate_lags 0 3 6 \
+      --seasonal_order 1,0,1 \
+      --seasonal_period 6
+
 Outputs
 -------
 CSV forecasts, model summary CSV, and PNG/PDF plots are written to data_out by
@@ -406,12 +415,13 @@ def center_or_standardize(X_train: pd.DataFrame,
 def fit_one_arimax(y: pd.Series,
                    X: pd.DataFrame,
                    order: Tuple[int, int, int],
+                   seasonal_order: Tuple[int, int, int, int] = (0, 0, 0, 0),
                    enforce_stationarity: bool = True):
     mod = SARIMAX(
         endog=y,
         exog=X,
         order=order,
-        seasonal_order=(0, 0, 0, 0),
+        seasonal_order=seasonal_order,
         trend="c",
         enforce_stationarity=enforce_stationarity,
         enforce_invertibility=True,
@@ -426,6 +436,7 @@ def fit_arimax_grid(y: pd.Series,
                     qmax: int,
                     d_values: Sequence[int],
                     parsimony_delta: float,
+                    seasonal_order: Tuple[int, int, int, int] = (0, 0, 0, 0),
                     enforce_stationarity: bool = True):
     rows = []
     for d in d_values:
@@ -433,7 +444,9 @@ def fit_arimax_grid(y: pd.Series,
             for q in range(qmax + 1):
                 order = (p, int(d), q)
                 try:
-                    res = fit_one_arimax(y, X, order, enforce_stationarity=enforce_stationarity)
+                    res = fit_one_arimax(y, X, order,
+                                        seasonal_order=seasonal_order,
+                                        enforce_stationarity=enforce_stationarity)
                     rows.append({
                         "order": order,
                         "aic": float(res.aic),
@@ -687,6 +700,40 @@ def plot_combined_scenarios(y: pd.Series,
         fig.savefig(f"{outbase}.{ext}", dpi=300 if ext == "png" else None, bbox_inches="tight")
     plt.close(fig)
 
+
+def plot_residuals(resid: pd.Series, outbase: str) -> None:
+    """Plot model residuals over time, with COVID window highlighted."""
+    fig, axes = plt.subplots(2, 1, figsize=(9.5, 7.0), sharex=False)
+
+    ax = axes[0]
+    ax.plot(resid.index, resid.values, lw=1.2)
+    ax.axhline(0, color="black", lw=0.8, ls="--")
+    ax.axvspan(pd.Timestamp("2020-01-01"), pd.Timestamp("2021-12-01"),
+               alpha=0.15, color="crimson", label="COVID window (2020–2021)")
+    ax.axvline(pd.Timestamp("2020-01-01"), color="crimson", lw=1.2, ls=":")
+    ax.set_title("Model residuals over time")
+    ax.set_ylabel("Residual")
+    ax.legend(loc="upper left", frameon=False)
+
+    ax2 = axes[1]
+    sigma = resid.std()
+    colors = ["crimson" if abs(v) > 2 * sigma else "steelblue" for v in resid.values]
+    ax2.bar(resid.index, resid.values, width=25, color=colors)
+    ax2.axhline(0, color="black", lw=0.8, ls="--")
+    ax2.axhline(2 * sigma,  color="orange", lw=1.0, ls="--", label=f"±2σ ({2*sigma:.4f})")
+    ax2.axhline(-2 * sigma, color="orange", lw=1.0, ls="--")
+    ax2.axvspan(pd.Timestamp("2020-01-01"), pd.Timestamp("2021-12-01"),
+                alpha=0.15, color="crimson")
+    ax2.set_title("Residuals — red bars exceed ±2σ")
+    ax2.set_ylabel("Residual")
+    ax2.legend(loc="upper left", frameon=False)
+
+    fig.tight_layout()
+    for ext in ("png", "pdf"):
+        fig.savefig(f"{outbase}.{ext}", dpi=300 if ext == "png" else None, bbox_inches="tight")
+    plt.close(fig)
+
+
 # ---------------------- main ----------------------
 
 def main() -> int:
@@ -737,6 +784,11 @@ def main() -> int:
 
     ap.add_argument("--fixed_order", type=parse_order, default=None,
                     help="Force ARIMA order p,d,q, e.g. 1,1,1. If omitted, a grid search is run.")
+    ap.add_argument("--seasonal_order", type=parse_order, default=None,
+                    help="Seasonal ARIMA order P,D,Q; period set by --seasonal_period. "
+                         "e.g. 1,0,1 adds seasonal AR and MA terms. Default: no seasonality.")
+    ap.add_argument("--seasonal_period", type=int, default=6,
+                    help="Seasonal period in months. Default: 6 (semi-annual).")
     ap.add_argument("--pmax", type=int, default=3, help="Max AR order for grid search. Default: 3.")
     ap.add_argument("--qmax", type=int, default=2, help="Max MA order for grid search. Default: 2.")
     ap.add_argument("--d_values", nargs="+", type=int, default=None,
@@ -834,6 +886,12 @@ def main() -> int:
         X_train_raw, X_train_raw.copy(), standardize=args.standardize_exog
     )
 
+    seas = (0, 0, 0, 0)
+    if args.seasonal_order is not None:
+        P, D, Q = args.seasonal_order
+        seas = (P, D, Q, args.seasonal_period)
+        print(f"[ok] seasonal order: {seas}")
+
     if args.fixed_order is None:
         order, res, grid = fit_arimax_grid(
             y_train, X_train,
@@ -841,6 +899,7 @@ def main() -> int:
             qmax=args.qmax,
             d_values=args.d_values,
             parsimony_delta=args.parsimony_delta,
+            seasonal_order=seas,
             enforce_stationarity=not args.no_enforce_stationarity,
         )
         grid_path = os.path.join(outdir, "national_arimax_grid.csv")
@@ -850,8 +909,15 @@ def main() -> int:
         order = args.fixed_order
         res = fit_one_arimax(
             y_train, X_train, order,
+            seasonal_order=seas,
             enforce_stationarity=not args.no_enforce_stationarity,
         )
+
+    plot_residuals(
+        res.resid,
+        outbase=os.path.join(outdir, "national_arimax_residuals"),
+    )
+    print(f"[ok] wrote residuals plot: {os.path.join(outdir, 'national_arimax_residuals.png')}")
 
     lbp = lb_pvals(res.resid, lags=(12, 24))
     print("\n=== National ARIMAX fit ===")
@@ -881,6 +947,9 @@ def main() -> int:
     params.to_csv(params_path, index=False, float_format="%.8f")
     print(f"[ok] wrote parameter table: {params_path}")
 
+    features_key = ",".join(X_train.columns)
+    seasonal_key = str(seas)
+
     summary = pd.DataFrame([{
         "market_col": args.market_col,
         "rate_col": chosen_rate_col,
@@ -889,17 +958,29 @@ def main() -> int:
         "sample_end": y_train.index[-1].strftime("%Y-%m-%d"),
         "nobs": int(len(y_train)),
         "order": str(order),
+        "seasonal_order": seasonal_key,
         "aic": float(res.aic),
         "aicc": float(aicc_from_res(res)),
         "bic": float(res.bic),
         "lb_p12": float(lbp[12]),
         "lb_p24": float(lbp[24]),
-        "features": ",".join(X_train.columns),
+        "features": features_key,
         "standardize_exog": bool(args.standardize_exog),
     }])
     summary_path = os.path.join(outdir, "national_arimax_summary.csv")
     summary.to_csv(summary_path, index=False, float_format="%.6f")
     print(f"[ok] wrote model summary: {summary_path}")
+
+    comparison_path = os.path.join(outdir, "national_arimax_comparison.csv")
+    if os.path.exists(comparison_path):
+        existing = pd.read_csv(comparison_path)
+        mask = (existing["features"] == features_key) & (existing["seasonal_order"] == seasonal_key)
+        existing = existing[~mask]
+        comparison = pd.concat([existing, summary], ignore_index=True)
+    else:
+        comparison = summary.copy()
+    comparison.to_csv(comparison_path, index=False, float_format="%.6f")
+    print(f"[ok] wrote comparison table: {comparison_path}")
 
     forecast_start = y_train.index[-1] + pd.offsets.MonthBegin(1)
     # Use the rate at the model's forecast origin. If rate extends beyond y_train,
