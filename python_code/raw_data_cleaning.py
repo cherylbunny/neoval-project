@@ -437,6 +437,21 @@ def clean_abs_cpi_rents():
     return out
 
 
+# ---------------------- covid dummy ----------------------
+
+def make_covid_dummy():
+    """
+    Binary dummy: 1 during Jan 2020 to Dec 2021, 0 otherwise.
+    Covers the period where model residuals show unusual behaviour.
+    """
+    monthly_idx = pd.date_range(start="1959-01-01", end="2026-12-01", freq="MS")
+    dummy = pd.Series(0, index=monthly_idx, name="covid_dummy")
+    dummy.loc["2020-01-01":"2021-12-01"] = 1
+    out = pd.DataFrame({"time": monthly_idx, "covid_dummy": dummy.values})
+    preview(out, "covid_dummy")
+    return out
+
+
 # ---------------------- main ----------------------
 
 def main():
@@ -452,6 +467,7 @@ def main():
     building_app   = clean_abs_building_approvals()
     dwelling_comm  = clean_abs_dwelling_commencements()
     cpi_rents      = clean_abs_cpi_rents()
+    covid_dummy    = make_covid_dummy()
 
     print("\n[done] all series cleaned")
     for name, df in [
@@ -467,6 +483,7 @@ def main():
         ("building_approvals",          building_app),
         ("dwelling_commencements",      dwelling_comm),
         ("cpi_rents",                   cpi_rents),
+        ("covid_dummy",                 covid_dummy),
     ]:
         print(f"  {name}: {len(df)} rows, {df.time.min().date()} to {df.time.max().date()}")
 
@@ -474,7 +491,7 @@ def main():
     dfs = [
         mortgage, cash_rate, bond_yields, housing_credit, housing_rate,
         unemployment, trimmed_mean, hh_income, migration, building_app,
-        dwelling_comm, cpi_rents,
+        dwelling_comm, cpi_rents, covid_dummy,
     ]
     combined = reduce(lambda left, right: pd.merge(left, right, on="time", how="outer"), dfs)
     combined = combined.sort_values("time").reset_index(drop=True)
